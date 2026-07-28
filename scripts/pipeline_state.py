@@ -264,6 +264,16 @@ def check_step(
         ok, output = run_validator(delivery, script, episode_no)
         if not ok:
             return False, f"上游确定性校验已失效，先修好再推进：\n{output}"
+        if step_id in ("canvas", "generate"):
+            # 此前这两步只跑一遍单集校验就返回通过，画布可以从没连过、成片可以不存在，
+            # 等于闸是空转的。机器无法替用户连画布与授权生成，但可以拒绝"无凭据即通过"。
+            return False, (
+                f"{step_id} 步需要真实画布/成片证据，机器无法自证：\n"
+                "  1) 先按 SKILL.md §8 跑 sync dry-run 与 audit_canvas_nodes（零硬错误）；\n"
+                "  2) generate 还需用户逐节点授权并完成十轴审计；\n"
+                "  3) 人工确认上述证据后，用 complete 显式标记，"
+                "并在交付 Markdown 里写明凭证。"
+            )
         if step_id == "review":
             # 「待二审」是为了打破"必须先自称已通过才能过机器闸"的死循环而存在的
             # 中间态；二审这一步完成时必须已经改成「已通过」，否则它会一路混到交付。

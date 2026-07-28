@@ -31,7 +31,8 @@ MASTER_ROW_RE = re.compile(
 HANDOFF_ROW_RE = re.compile(
     r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|$", re.M
 )
-WEAK_CHANGE_RE = re.compile(r"^(?:无|不适用|未知|待定|剧情需要|见剧本)$")
+# 允许尾随标点与空白：写成「无。」曾可绕过这条拦截。
+WEAK_CHANGE_RE = re.compile(r"^\s*(?:无|不适用|未知|待定|剧情需要|见剧本)[\s。．.,，;；!！]*$")
 
 
 @dataclass

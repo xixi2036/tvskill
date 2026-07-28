@@ -125,6 +125,19 @@ class PipelineStateTests(unittest.TestCase):
         self.assertFalse(ok, detail)
         self.assertIn("待二审", detail)
 
+    def test_canvas_and_generate_require_real_evidence(self):
+        """这两步曾只跑一遍单集校验就能标 done，画布可以从没连过。"""
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "assets" / "libtv-video-prompts.template.md"
+        ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
+        self.delivery.write_text(template, encoding="utf-8")
+        for step in ("canvas", "generate"):
+            with self.subTest(step):
+                ok, detail = MODULE.check_step(step, "EP01", self.dir, None, None)
+                self.assertFalse(ok)
+                self.assertIn("机器无法自证", detail)
+
     def test_review_step_accepts_completed_audit(self):
         template = (
             Path(__file__).resolve().parents[1]

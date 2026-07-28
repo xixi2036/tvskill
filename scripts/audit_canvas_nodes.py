@@ -32,11 +32,19 @@ from _shared_patterns import (  # noqa: E402
 )
 
 
+# 节点一旦真实生成过，平台会把 prompt 里的 {{Mixed N}} 按素材形态改写成
+# {{Image N}} 或 {{Portrait N}}。此前正则只认字面 Mixed，导致对每个已生成节点
+# 系统性报"画布 Mixed 未被提示词绑定"，而 SKILL.md 又规定"未通过审计＝拒绝态"，
+# 等于把所有已生成节点判死、连续性链彻底断掉。
+# 改写是平台的合法产物，不是错误：审计一律接受三种写法；
+# 只有 --pre-run 门禁（生成前）才要求必须是原始的 {{Mixed N}}。
+MIXED_TOKEN = r"\{\{(?:Mixed|Image|Portrait)\s+(?P<number>\d+)\}\}"
+REWRITTEN_TOKEN_RE = re.compile(r"\{\{(?:Image|Portrait)\s+\d+\}\}")
 BRACKET_BINDING_RE = re.compile(
-    r"@\[(?P<label>[^\]]+)\]\s*\{\{Mixed\s+(?P<number>\d+)\}\}"
+    r"@\[(?P<label>[^\]]+)\]\s*" + MIXED_TOKEN
 )
 PAREN_BINDING_RE = re.compile(
-    r"@(?P<label>[^@\n(){}]{1,80})\(\{\{Mixed\s+(?P<number>\d+)\}\}\)"
+    r"@(?P<label>[^@\n(){}]{1,80})\(" + MIXED_TOKEN + r"\)"
 )
 SYNC_CUE_RE = re.compile(r"(?:他说|她说|开口说|说出).{0,12}\{")
 CHINESE_SHOT_RE = re.compile(r"^镜头\s*(\d+)\s*：", re.M)
@@ -336,7 +344,8 @@ def audit_node(detail: dict[str, Any]) -> tuple[list[str], list[str], dict[str, 
             if found:
                 spoken_subjects.add(found[-1])
         controlled_subjects = set(re.findall(
-            r"\{\{Mixed\s+\d+\}\}.{0,40}?只控制\s*(<主体\d+>).{0,24}?音色",
+            r"\{\{(?:Mixed|Image|Portrait)\s+\d+\}\}.{0,40}?只控制\s*"
+            r"(<主体\d+>|[^\s，。；：,、]{0,10}(?:VO|OS|旁白)).{0,24}?音色",
             prompt,
         ))
         missing = sorted(spoken_subjects - controlled_subjects)
@@ -488,6 +497,14 @@ def main() -> int:
     receipt_rows: list[dict[str, Any]] = []
     for detail in details:
         errors, warnings, summary = audit_node(detail)
+        if args.pre_run and REWRITTEN_TOKEN_RE.search(
+            str(params_of(detail).get("prompt", ""))
+        ):
+            node_errors.append(
+                "运行前门禁要求提示词是原始 {{Mixed N}}；"
+                "当前含平台改写后的 {{Image N}}/{{Portrait N}}，"
+                "说明该节点已生成过，请新建版本节点而不是复用"
+            )
         if args.pre_run and task_status(detail) == 2:
             errors.append("运行前门禁要求未运行节点；当前节点已有成功生成结果")
         total_errors += len(errors)
