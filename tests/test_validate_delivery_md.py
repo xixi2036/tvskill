@@ -78,11 +78,15 @@ VALID = """# EP01｜LibTV 完成提示词
 ### LibTV 完成提示词（整块复制）
 
 ```text
-现代学院教室白日文戏，右侧冷白窗光与室内顶灯。将 @[单知影] {{Mixed 1}} 中的稳定身份特征定义为 <主体1>；将 @[李威] {{Mixed 2}} 中的稳定身份特征定义为 <主体2>；@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色、节奏与口型，不继承其它台词和背景声。参考 @[首帧-3-1-B] {{Mixed 4}} 的干净画面、人物位置和真实视线对象；将 @[场景状态-Z班-S1] {{Mixed 5}} 定义为 <场景1>，只参考空间、光线和当前人数。人物图只锁各自身份，不继承原姿势和原视线。
+现代学院教室白日文戏，Kodak Vision3 35mm film grain 颗粒 + 低饱和冷调写实色调。将 @[单知影] {{Mixed 1}} 中的稳定身份特征定义为 <主体1>，该图作为 <主体1> 的视觉锚定，五官、发型与制服严格按此图渲染，不可改造；将 @[李威] {{Mixed 2}} 中的稳定身份特征定义为 <主体2>，该图作为 <主体2> 的视觉锚定，严格按此图渲染，不可改造。@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色与口型，不继承其它台词、情绪和背景声。参考 @[首帧-3-1-B] {{Mixed 4}} 的干净画面、人物位置和真实视线对象；将 @[场景状态-Z班-S1] {{Mixed 5}} 定义为 <场景1>，只参考空间、光线和当前人数。人物图只锁各自身份，不继承原姿势和原视线。
 
-单一连续镜头，无剪切。中近景，稳定三分之四侧机位。<主体2> 听见房间安静后才开口，把视线锁在 <主体1> 的右肩背；<主体2> 严格使用 Mixed 3 的音色，自然说出 {哼，装什么装！}，一口自然说完；说完恢复鼻息，继续听着 <主体1> 的方向，右手自然留在桌沿。（全程无背景音乐）
+单一连续镜头，无剪切。中近景，稳定三分之四侧机位。【阶段1：起手】右侧 #C9D8E4 冷白窗光落在 <主体1> 的右肩，室内顶灯投出 #8A7A5E 暖色补光，两人保持既有座位。【阶段2：开口】<主体2> 听见房间安静后才开口，把视线锁在 <主体1> 的右肩背；<主体2> 严格使用 Mixed 3 的音色，自然说出 {哼，装什么装！}，一口自然说完；说完恢复鼻息，继续听着 <主体1> 的方向，右手自然留在桌沿。
 
-真人实拍，右侧窗光和室内顶灯方向固定。保持人物身份、服装、人数、位置和眼神轴线一致；两位人物各只出现一人，禁止人物重复复刻。保持无字幕，不生成可辨识文字、水印或 Logo。
+【声音设计】0-2秒：教室低频环境底噪与远处走廊人声；2-4秒：<主体2> 的原声台词与轻微椅面摩擦声；4-10秒持续：环境底噪延续到落幅。仅生成人声与环境音效，不要 bgm。
+
+【关键约束】机位铁律：全程稳定三分之四侧，不推不拉不摇。身份铁律：<主体1> 与 <主体2> 各只出现一人，禁止人物重复复刻，不得交换身份或服装。光向铁律：右侧窗光与室内顶灯方向全程固定。
+
+真人实拍，保持人物身份、服装、人数、位置和眼神轴线一致。保持无字幕，不生成可辨识文字、水印或 Logo。NOT slow motion+NOT speed ramping+NOT 卡通渲染+NOT 三维动画+NOT 换脸+NOT 多余人物入画。
 ```
 
 ### 衔接
@@ -222,10 +226,10 @@ class DeliveryMarkdownTests(unittest.TestCase):
         ).replace("| Mixed 4 |", "| Mixed 3 |").replace("| Mixed 5 |", "| Mixed 4 |").replace(
             "{{Mixed 4}}", "{{Mixed 3}}"
         ).replace("{{Mixed 5}}", "{{Mixed 4}}").replace(
-            "；@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色、节奏与口型，不继承其它台词和背景声",
+            "。@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色与口型，不继承其它台词、情绪和背景声",
             "",
         )
-        self.assertTrue(any("必须绑定每名说话人的独立音色音频" in e for e in self.errors(invalid)))
+        self.assertTrue(any("必须为每名说话人绑定独立音色音频" in e for e in self.errors(invalid)))
 
     def test_preview_without_audio_is_blocked(self):
         invalid = VALID.replace(
@@ -233,12 +237,12 @@ class DeliveryMarkdownTests(unittest.TestCase):
         ).replace("| Mixed 4 |", "| Mixed 3 |").replace("| Mixed 5 |", "| Mixed 4 |").replace(
             "{{Mixed 4}}", "{{Mixed 3}}"
         ).replace("{{Mixed 5}}", "{{Mixed 4}}").replace(
-            "；@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色、节奏与口型，不继承其它台词和背景声",
+            "。@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色与口型，不继承其它台词、情绪和背景声",
             "",
         ).replace("- 交付等级：正式", "- 交付等级：预览").replace(
             "- 制作路线：绑定逐句音频原生同步", "- 制作路线：模型合成预览"
         ).replace("- 音色状态：已绑定李威逐句音频", "- 音色状态：未绑定")
-        self.assertTrue(any("必须绑定每名说话人的独立音色音频" in e for e in self.errors(invalid)))
+        self.assertTrue(any("必须为每名说话人绑定独立音色音频" in e for e in self.errors(invalid)))
 
     def test_dialogue_requires_eyeline_target(self):
         invalid = VALID.replace("把视线锁在 <主体1> 的右肩背", "保持原来的表情").replace(
@@ -316,10 +320,83 @@ class DeliveryMarkdownTests(unittest.TestCase):
 
     def test_slop_quality_bundle_is_rejected(self):
         invalid = VALID.replace(
-            "真人实拍，右侧窗光和室内顶灯方向固定。",
-            "真人实拍，高清，细节丰富，电影质感，色彩自然，光影柔和，右侧窗光和室内顶灯方向固定。",
+            "真人实拍，保持人物身份、服装、人数、位置和眼神轴线一致。",
+            "真人实拍，高清，细节丰富，电影质感，色彩自然，光影柔和，保持人物身份一致。",
         )
         self.assertTrue(any("空泛画质词过多" in e for e in self.errors(invalid)))
+
+    def test_arbitrary_bracket_text_is_still_rejected(self):
+        invalid = VALID.replace("【关键约束】机位铁律", "【标题：Z班开学】【关键约束】机位铁律")
+        self.assertTrue(any("禁用的【】画面文字语法" in e for e in self.errors(invalid)))
+
+    def test_sound_design_block_may_layer_by_second(self):
+        errors, _, _ = self.validate_text(VALID)
+        self.assertFalse(any("绝对时间码" in e for e in errors))
+
+    def test_timecode_outside_sound_design_is_still_rejected(self):
+        invalid = VALID.replace(
+            "【阶段1：起手】右侧",
+            "【阶段1：起手】第3秒时右侧",
+        )
+        self.assertTrue(any("绝对时间码" in e for e in self.errors(invalid)))
+
+    def test_timecode_after_trailing_sound_design_block_is_rejected(self):
+        sound_block = (
+            "【声音设计】0-2秒：教室低频环境底噪与远处走廊人声；"
+            "2-4秒：<主体2> 的原声台词与轻微椅面摩擦声；"
+            "4-10秒持续：环境底噪延续到落幅。仅生成人声与环境音效，不要 bgm。\n\n"
+        )
+        closing = (
+            "真人实拍，保持人物身份、服装、人数、位置和眼神轴线一致。"
+            "保持无字幕，不生成可辨识文字、水印或 Logo。"
+            "NOT slow motion+NOT speed ramping+NOT 卡通渲染+NOT 三维动画+"
+            "NOT 换脸+NOT 多余人物入画。"
+        )
+        # 把声音设计挪到末尾，并在其后追加一段带绝对时间码的收尾：豁免不得越出本段
+        invalid = VALID.replace(sound_block, "").replace(
+            closing, sound_block + closing.replace("真人实拍，", "真人实拍，第5秒时"),
+        )
+        self.assertIn("第5秒", invalid)
+        self.assertTrue(any("绝对时间码" in e for e in self.errors(invalid)))
+
+    def test_missing_wanwu_craft_warns_on_formal_segment(self):
+        candidate = VALID.replace(
+            "【关键约束】机位铁律：全程稳定三分之四侧，不推不拉不摇。", ""
+        )
+        errors, warnings, _ = self.validate_text(candidate)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("万物生结构六件套" in w for w in warnings))
+
+    def voice_slot_text(self) -> str:
+        return VALID.replace(
+            "| Mixed 3 | 李威逐句音频 | 音频 | @[李威-逐句音频] |",
+            "| Mixed 3 | 李威-音色占位槽（待人工上传） | 音频（待上传） | @[李威-逐句音频] |",
+        ).replace(
+            "- 音色状态：已绑定李威逐句音频",
+            "- 音色状态：待关联｜占位槽：李威-音色参考（待人工上传）",
+        ).replace("- 运行状态：可运行", "- 运行状态：阻塞")
+
+    def test_voice_slot_passes_and_warns(self):
+        errors, warnings, _ = self.validate_text(self.voice_slot_text())
+        self.assertEqual(errors, [])
+        self.assertTrue(any("音色占位槽待人工上传后关联" in w for w in warnings))
+
+    def test_voice_slot_cannot_be_runnable(self):
+        invalid = self.voice_slot_text().replace("- 运行状态：阻塞", "- 运行状态：可运行")
+        self.assertTrue(any("运行状态必须为阻塞" in e for e in self.errors(invalid)))
+
+    def test_voice_slot_requires_pending_status(self):
+        invalid = self.voice_slot_text().replace(
+            "- 音色状态：待关联｜占位槽：李威-音色参考（待人工上传）",
+            "- 音色状态：已绑定李威逐句音频",
+        )
+        self.assertTrue(any("音色状态必须写明“待关联”" in e for e in self.errors(invalid)))
+
+    def test_pending_status_requires_real_slot_row(self):
+        invalid = VALID.replace(
+            "- 音色状态：已绑定李威逐句音频", "- 音色状态：待关联"
+        )
+        self.assertTrue(any("没有对应的音色占位槽" in e for e in self.errors(invalid)))
 
 
 if __name__ == "__main__":

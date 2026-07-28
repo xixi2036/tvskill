@@ -24,6 +24,7 @@ MIXED_RE = re.compile(
     re.M,
 )
 TEXT_VOICE_RE = re.compile(r"(?<!\{)\{[^{}\n]+\}(?!\})|\b(?:OS|VO)\b|内心|画外音|旁白", re.I)
+VOICE_SLOT_RE = re.compile(r"待上传|占位")
 PLANNING_RE = re.compile(
     r"位置图|轨迹图|构图图|动线图|平面图|俯视图|机位图|箭头|虚线|假人|色块|网格|文字标注"
 )
@@ -93,16 +94,23 @@ def parse_markdown(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
         audio_rows = [row for row in rows if "音频" in row["mediaType"]]
         planning_rows = [row["asset"] for row in rows if PLANNING_RE.search(row["asset"])]
         has_text_voice = bool(TEXT_VOICE_RE.search(prompt_match.group(1)))
+        voice_slots = [
+            row["asset"] for row in audio_rows
+            if VOICE_SLOT_RE.search(f"{row['asset']} {row['mediaType']}")
+        ]
+        blocked: list[str] = []
+        if voice_slots:
+            blocked.append(
+                f"音色仍是占位槽 {voice_slots}；"
+                "请先由人工上传音色素材到画布，再执行音色关联"
+                "（回读 audioList/mixedListOrder → 回填素材名与 Mixed 顺序 → 重跑校验）后同步"
+            )
         if run_status == "阻塞":
-            raise ValueError(f"V{match.group(1)} 运行状态为阻塞，禁止同步到可生成节点")
+            blocked.append("运行状态为阻塞，禁止同步到可生成节点")
         if planning_rows:
-            raise ValueError(
-                f"V{match.group(1)} 规划资产禁止进入 Mixed：{planning_rows}"
-            )
+            blocked.append(f"规划资产禁止进入 Mixed：{planning_rows}")
         if has_text_voice and (sound != "开启" or not audio_rows):
-            raise ValueError(
-                f"V{match.group(1)} 含台词/OS/VO/旁白，必须开启声音并绑定独立音色音频"
-            )
+            blocked.append("含台词/OS/VO/旁白，必须开启声音并绑定独立音色音频")
         segments.append(
             {
                 "number": match.group(1),
@@ -111,6 +119,7 @@ def parse_markdown(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
                 "sound": "on" if sound == "开启" else "off",
                 "prompt": prompt_match.group(1).strip(),
                 "mixed": rows,
+                "blocked": blocked,
             }
         )
     if not segments:
@@ -268,6 +277,19 @@ def main() -> int:
             segments = [segment for segment in segments if segment["number"] in selected]
             if not segments:
                 raise ValueError("--only 没有匹配任何生成段")
+        blocked_segments = [segment for segment in segments if segment["blocked"]]
+        if blocked_segments:
+            detail = "；".join(
+                f"V{segment['number']} {'／'.join(segment['blocked'])}"
+                for segment in blocked_segments
+            )
+            ready = [
+                segment["number"] for segment in segments if not segment["blocked"]
+            ]
+            hint = (
+                f"；其余已就绪段可用 --only {','.join(ready)} 先行同步" if ready else ""
+            )
+            raise ValueError(f"{detail}{hint}")
         listing = run([libtv, "node", "list", "-p", args.project], cwd=cwd)
         listed = listing.get("nodes")
         if not isinstance(listed, list):

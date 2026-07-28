@@ -81,10 +81,18 @@ BANNED_DELIVERY = (
 BANNED_PROMPT_PATTERNS = (
     (re.compile(r"@(?:图片|视频|音频)\d+"), "旧式 @图片N/@视频N/@音频N"),
     (re.compile(r"\b(?:TODO|TBD|DURATION_SEC)\b", re.I), "待办或内部变量"),
-    (ABSOLUTE_TIME_RE, "绝对时间码"),
-    (re.compile(r"【[^】]+】"), "零文字任务中禁用的【】画面文字语法"),
     (re.compile(r"【空间锚点"), "旧式空间锚点字段"),
 )
+BRACKET_RE = re.compile(r"【[^】]*】")
+ALLOWED_BRACKETS_RE = re.compile(r"^【(?:阶段\d+[^】]*|声音设计|关键约束)】$")
+SOUND_DESIGN_BLOCK_RE = re.compile(r"【声音设计】.*?(?=\n\s*\n|\n\s*【|\Z)", re.S)
+STYLE_LOCK_RE = re.compile(r"^[^\n]*(?:美学|质感|色调|film|grain|aesthetics)[^\n]*$", re.I)
+ASSET_ANCHOR_RE = re.compile(r"严格按此图渲染|视觉锚定.{0,24}不可改造")
+INLINE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
+NAMED_IRON_RULE_RE = re.compile(r"[^\s，。；：]{2,12}铁律")
+NOT_CHAIN_RE = re.compile(r"NOT\s+\S+.{0,80}?NOT\s+\S+", re.S | re.I)
+VOICE_SLOT_RE = re.compile(r"待上传|占位")
+VOICE_PENDING_STATUS_RE = re.compile(r"待关联")
 EYE_TARGET_RE = re.compile(
     r"(?:视线|目光)(?:始终)?(?:落在|落向|锁在|锁定|停在|停向|投向|移向|固定在)"
     r"|看向|盯住|余光"
@@ -459,6 +467,33 @@ def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
         for pattern, description in BANNED_PROMPT_PATTERNS:
             if pattern.search(prompt):
                 errors.append(f"{label} 提示词含禁用内容：{description}")
+        bad_brackets = sorted({
+            token for token in BRACKET_RE.findall(prompt)
+            if not ALLOWED_BRACKETS_RE.match(token)
+        })
+        if bad_brackets:
+            errors.append(
+                f"{label} 提示词含禁用的【】画面文字语法：{bad_brackets}；"
+                "只允许【阶段N…】【声音设计】【关键约束】三类结构标记"
+            )
+        if ABSOLUTE_TIME_RE.search(SOUND_DESIGN_BLOCK_RE.sub("", prompt)):
+            errors.append(f"{label} 提示词含禁用内容：绝对时间码")
+
+        if grade == "正式":
+            first_line = prompt.splitlines()[0] if prompt.splitlines() else ""
+            for present, missing_desc in (
+                (bool(STYLE_LOCK_RE.match(first_line)), "开篇风格锁定行"),
+                (bool(ASSET_ANCHOR_RE.search(prompt)), "逐资产视觉锚定语"),
+                (bool(INLINE_HEX_RE.search(prompt)), "inline HEX 色值"),
+                ("【声音设计】" in prompt, "独立【声音设计】分层段"),
+                (
+                    "【关键约束】" in prompt and bool(NAMED_IRON_RULE_RE.search(prompt)),
+                    "【关键约束】具名铁律",
+                ),
+                (bool(NOT_CHAIN_RE.search(prompt)), "结尾 NOT 链"),
+            ):
+                if not present:
+                    warnings.append(f"{label} 正式段缺少万物生结构六件套：{missing_desc}")
 
         if "：“" in prompt or "：\"" in prompt:
             errors.append(f"{label} 台词必须使用 {{精确原文}}，不能使用引号台词")
@@ -492,7 +527,33 @@ def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
                 errors.append(f"{label} 有文本声音但缺少音色状态")
             audio_rows = [row for row in rows if "音频" in row[2]]
             if not audio_rows:
-                errors.append(f"{label} 有台词/OS/VO/旁白时必须绑定每名说话人的独立音色音频")
+                errors.append(
+                    f"{label} 有台词/OS/VO/旁白时必须为每名说话人绑定独立音色音频，"
+                    "或声明明确的音色占位槽"
+                )
+            slot_rows = [
+                row for row in audio_rows
+                if VOICE_SLOT_RE.search(f"{row[1]} {row[2]}")
+            ]
+            status_text = voice_status.group(1) if voice_status else ""
+            status_pending = bool(VOICE_PENDING_STATUS_RE.search(status_text))
+            if slot_rows:
+                slots = [row[1] for row in slot_rows]
+                if not status_pending:
+                    errors.append(
+                        f"{label} 存在音色占位槽 {slots}，音色状态必须写明“待关联”"
+                    )
+                if run_status != "阻塞":
+                    errors.append(
+                        f"{label} 音色占位槽未关联真实音频前，运行状态必须为阻塞"
+                    )
+                warnings.append(
+                    f"{label} 音色占位槽待人工上传后关联：{slots}"
+                )
+            elif status_pending:
+                errors.append(
+                    f"{label} 音色状态标为待关联，但 Mixed 表中没有对应的音色占位槽"
+                )
             if sound != "开启":
                 errors.append(f"{label} 有台词/OS/VO/旁白时必须开启声音并原生声画同出")
             if audio_rows and not re.search(
