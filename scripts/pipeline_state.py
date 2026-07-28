@@ -148,7 +148,14 @@ def section(text: str, heading: str) -> str:
 
 
 def run_validator(delivery: Path, script: Path | None, episode_no: int | None) -> tuple[bool, str]:
-    command = [sys.executable, str(SCRIPT_DIR / "validate_delivery_md.py"), str(delivery)]
+    # 加 --standalone：流程凭据由本状态机自己维护，若让校验器反过来查凭据，
+    # coverage 步骤会要求"coverage 已完成"才能通过，形成永远过不去的死锁。
+    command = [
+        sys.executable,
+        str(SCRIPT_DIR / "validate_delivery_md.py"),
+        str(delivery),
+        "--standalone",
+    ]
     if script:
         command += ["--script", str(script)]
     if episode_no is not None:

@@ -110,5 +110,70 @@ class PipelineStateTests(unittest.TestCase):
         self.assertEqual(state["steps"]["entities"], "done")
 
 
+
+class DeliverableGateTests(unittest.TestCase):
+    """交付凭据闸：不跑状态机就直接跑校验器，等于绕过整条流程锁。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.delivery = self.dir / "EP01-LibTV视频节点提示词.md"
+        self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "validate_delivery_md",
+            Path(__file__).resolve().parents[1] / "scripts" / "validate_delivery_md.py",
+        )
+        self.validator = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(self.validator)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def write_state(self, steps: dict) -> None:
+        (self.dir / "EP01-run_state.json").write_text(
+            json.dumps({"episode": "EP01", "steps": steps, "deliveryHash": ""}),
+            encoding="utf-8",
+        )
+
+    def test_missing_state_file_is_rejected(self):
+        errors, _ = self.validator.check_pipeline_state(self.delivery)
+        self.assertTrue(any("缺少流程凭据" in e for e in errors))
+
+    def test_incomplete_steps_are_rejected(self):
+        self.write_state({"script_units": "done", "entities": "done"})
+        errors, _ = self.validator.check_pipeline_state(self.delivery)
+        self.assertTrue(any("前置步骤尚未完成" in e for e in errors))
+
+    def test_complete_state_passes(self):
+        self.write_state(
+            {s: "done" for s in
+             ("script_units", "entities", "assets", "segments", "coverage")}
+        )
+        errors, _ = self.validator.check_pipeline_state(self.delivery)
+        self.assertEqual(errors, [])
+
+    def test_stale_hash_warns(self):
+        (self.dir / "EP01-run_state.json").write_text(
+            json.dumps({
+                "episode": "EP01",
+                "steps": {s: "done" for s in
+                          ("script_units", "entities", "assets", "segments", "coverage")},
+                "deliveryHash": "0" * 64,
+            }),
+            encoding="utf-8",
+        )
+        errors, warnings = self.validator.check_pipeline_state(self.delivery)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("流程凭据已过期" in w for w in warnings))
+
+    def test_state_machine_passes_standalone_to_avoid_deadlock(self):
+        """coverage 步骤要调校验器；若校验器反查凭据会要求 coverage 已完成 = 死锁。"""
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "pipeline_state.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--standalone", source)
+
+
 if __name__ == "__main__":
     unittest.main()

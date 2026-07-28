@@ -334,8 +334,54 @@ def check_coverage_against_script(
     return errors
 
 
+def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
+    """交付校验必须有流程凭据：不跑状态机就直接跑本脚本，等于绕过整条流程锁。
+
+    交付物名形如 `<集号>-LibTV视频节点提示词.md`，对应 `<集号>-run_state.json`。
+    """
+    import json
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    episode = path.name.split("-")[0]
+    state_file = path.parent / f"{episode}-run_state.json"
+    if not state_file.exists():
+        errors.append(
+            f"缺少流程凭据 {state_file.name}：本脚本的通过结论只在走完 pipeline_state.py "
+            "的前提下才算数。若只是单独检查一个文件，请显式加 --standalone"
+        )
+        return errors, warnings
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        errors.append(f"流程凭据无法解析：{exc}")
+        return errors, warnings
+    steps = state.get("steps", {})
+    required = ("script_units", "entities", "assets", "segments", "coverage")
+    missing = [step for step in required if steps.get(step) != "done"]
+    if missing:
+        errors.append(
+            f"流程凭据显示这些前置步骤尚未完成：{missing}；"
+            "请回到 pipeline_state.py 依次过闸，不要跳步"
+        )
+    recorded = state.get("deliveryHash", "")
+    if recorded:
+        import hashlib
+
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != recorded:
+            warnings.append(
+                "交付 Markdown 自上次记录后已改动，流程凭据已过期；"
+                "本次校验通过后需重新 complete 相关步骤"
+            )
+    return errors, warnings
+
+
 def validate(
-    path: Path, script: Path | None = None, episode: int | None = None
+    path: Path,
+    script: Path | None = None,
+    episode: int | None = None,
+    standalone: bool = True,
 ) -> tuple[list[str], list[str], dict[str, int]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -865,6 +911,11 @@ def validate(
     elif durations and int(total_match.group(1)) != sum(durations):
         errors.append(f"总时长应为 {sum(durations)} 秒")
 
+    if not standalone:
+        state_errors, state_warnings = check_pipeline_state(path)
+        errors.extend(state_errors)
+        warnings.extend(state_warnings)
+
     return errors, warnings, {
         "videoSegments": len(matches),
         "totalDurationSeconds": sum(durations),
@@ -882,9 +933,16 @@ def main() -> int:
         help="原剧本（.docx/.txt/.md）；传入后逐条核对画面对账是否漏行、是否被改写",
     )
     parser.add_argument("--episode", type=int, help="原剧本中的集号")
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="只单独检查这一个文件，不作为交付凭据（跳过流程状态机检查）",
+    )
     args = parser.parse_args()
     try:
-        errors, warnings, summary = validate(args.markdown, args.script, args.episode)
+        errors, warnings, summary = validate(
+            args.markdown, args.script, args.episode, standalone=args.standalone
+        )
     except (OSError, UnicodeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
