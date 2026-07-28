@@ -113,7 +113,8 @@ Markdown 不能交付，未通过成片验收的状态不能写成连续性真�
 确定性检查使用：
 
 ```bash
-python3 scripts/validate_delivery_md.py <本集.md>
+python3 scripts/validate_delivery_md.py <本集.md> \
+  --script <原剧本.docx> --episode <集号数字>
 python3 scripts/audit_series_continuity.py <剧集提示词目录或多个Markdown>
 ```
 

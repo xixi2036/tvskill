@@ -18,7 +18,7 @@ description: 把中文竖屏短剧剧本走完整条 AI 生产链——提取角
 
 - 每集只输出一个 `<集号>-LibTV视频节点提示词.md`。
 - 不生成或交付 `candidate.json`、`asset-plan.json`、`movement-ledger.json`、`reference-manifest.json`。
-- 所有视频生成节点默认使用模型 `Seedance 2.0 Fast VIP`、画幅 `9:16`、分辨率 `480P`；只有用户明确指定其它参数时才覆盖。
+- 所有视频生成节点默认使用模型 `Seedance 2.0 Fast VIP`、画幅 `9:16`、分辨率 `480P`。**校验器目前对这三项是硬约束**：用户确需其它取值（如 720P、16:9）时，当前无法通过确定性校验，需先改校验器的白名单而不是绕过校验——在此之前请如实告知用户这是已知限制，不要私自放宽。
 - Markdown 中每一段对应一次 LibTV 视频生成，段内 `text` 代码块是可整块复制的最终提示词。
 - 最终提示词必须使用 `@[语义资产]` 和 `{{Mixed N}}`；`Mixed N` 按该段实际上传/连接的素材顺序从 1 连续编号。
 - 每段必须标记交付等级、制作路线、风险标签、运行状态和连续性模式。正式片段只有通过生成前五道闸门后才能标为“可运行”。
@@ -92,7 +92,7 @@ python3 scripts/pipeline_state.py complete <集号> <步骤> --script <原剧本
 3. 完整读取 [制作就绪与返工合同](references/libtv/production-readiness-and-retake-contract.md)、[全剧提示词二审合同](references/libtv/series-continuity-audit-contract.md)、[LibTV 完成提示词规范](references/libtv/libtv-completed-prompt-format.md)、[Seedance 2.0 官方指南知识快照](references/libtv/seedance-2.0-official-guide-snapshot.md)、[Seedance 2.0 官方提示词优化适配](references/libtv/seedance-2.0-official-prompt-optimizer.md)、[真人表演、眼神与对白合同](references/libtv/performance-dialogue-contract.md)、[场景拓扑与功能朝向](references/libtv/scene-topology-and-functional-orientation.md)、[光影构图与画面风格母版](references/libtv/visual-look-and-style-bible.md)、[生成成片质量审计](references/libtv/generated-take-quality-audit.md)、[人工复制交付合同](references/libtv/manual-video-node-delivery.md)和 [Seedance 适配](references/libtv/seedance-2.0-adaptation.md)。
 4. 完整读取 [万物生实战 Craft 补充](references/libtv/wanwu-field-craft.md)：过冲量、反英雄景别与音画距离耦合三项官方规范未覆盖、但被真实上线成片反复验证的手法；与既有合同冲突时以既有合同为准。
 5. 项目没有现成素材、需要先造资产时，完整读取 [资产生产合同](references/libtv/asset-production-contract.md)。
-5. 只有用户要求实际操作 LibTV CLI 时，才读取 [LibTV 画布合同](references/libtv/libtv-canvas-contract.md)并核对本机版本与模型 schema。
+6. 只有用户要求实际操作 LibTV CLI 时，才读取 [LibTV 画布合同](references/libtv/libtv-canvas-contract.md)并核对本机版本与模型 schema。
 
 ## 核心知识库模块
 
@@ -270,6 +270,14 @@ python3 scripts/extract_voice_reference.py <历史成片.mp4> <角色名-历史�
 - 资产清单（人物/场景/道具/色卡四类齐全）；
 - 画面对账（原剧本每条画面指令一行，落点写到 V##-Shot#，或转后期叠字、或舍弃＋理由）。
 
+交付 Markdown 的**必需章节**（缺一即校验失败，以校验器为准）：
+`## 使用方法`、`## 公共素材清单`、`## 资产清单`、`## 全剧连续性声明`、`## 全剧连续性母版`、
+`## 段间衔接总表`、`## 语音对账`、`## 画面对账`。
+每个生成段内必需：`### Mixed 上传顺序`、`### LibTV 完成提示词（整块复制）`、`### 衔接`、
+`### 状态交接`（至少一行有效状态）、`### 剧本事实对账`（至少一行，且结果全为"通过"）。
+全剧连续性声明必需字段还包括 `剧情时间锚`、`前集承接`、`本集最终出点`。
+以上以 `assets/libtv-video-prompts.template.md` 为唯一可复制骨架——照模板抄，不要自行拼装。
+
 ### 6. 全剧二次导演检查
 
 提示词初稿完成后不得直接交付。读取同项目全部可用剧本、既有集 Markdown 和已验收
@@ -337,7 +345,7 @@ python3 scripts/audit_canvas_nodes.py --project <PROJECT_UUID> --name-prefix <�
 
 ## 交付标准
 
-- 交付目录只新增一个 Markdown 成品，不新增 JSON；
+- 交付目录只新增一个 Markdown 成品；不产出 `candidate.json`、`asset-plan.json`、`movement-ledger.json`、`reference-manifest.json` 这类中间态 JSON。流程状态机的 `<集号>-run_state.json` 与 `<集号>-画面单元.json` 是**流程凭据不是交付物**，必须与交付 Markdown 同目录（校验器要靠它判断流程有没有走完），交付给下游时不随附；
 - Markdown 包含真实审核范围、全剧连续性母版、每段前置依赖和状态交接；
 - 全剧资料齐全时跨全部集二审；资料不全时明确写“截至EPXX”或“单集”；
 - 确定性校验与七遍语义二审全部通过后才允许标记“已通过”；
@@ -354,7 +362,7 @@ python3 scripts/audit_canvas_nodes.py --project <PROJECT_UUID> --name-prefix <�
   学生回看只分级转动眼、头、肩，不改变骨盆、膝盖和课桌朝向；
 - 每个可识别人物使用独立人物图，规划图不进入 Mixed，干净生成资产各司其职；
 - 台词、OS、VO、旁白逐说话人绑定合法独立音色；音色未上传时写明占位槽并标阻塞，关联真实音频后才可运行，不得关闭原声绕过，也不得由助手代选音色；
-- 正式段提示词携带结构六件套：风格锁定行、逐资产视觉锚定语、阶段节拍与 inline HEX、独立声音设计段、具名铁律、结尾 NOT 链；
+- 正式段提示词携带结构六件套：风格锁定行、逐资产视觉锚定语、阶段节拍与 inline HEX、独立声音设计段、具名铁律、结尾 NOT 链（**机器只给警告不拦截**——结构在不在机器能判，写得对不对判不了；这一条靠人工与成片验收把关，升级成硬错误前须先全季回归）；
 - 台词逐字保留且只出现一次；
 - 画面对账逐条对源核验通过：原剧本每条画面指令都有落点或显式处置，无一行缺失或被改写；
 - 资产清单四类齐全，含精确文字的道具有定版道具图，已登记的色卡在每段都完成绑定；

@@ -71,10 +71,12 @@ def segment_end(matches: list[re.Match[str]], index: int, text: str) -> int:
     return matches[index + 1].start() if index + 1 < len(matches) else len(text)
 
 
-def parse_markdown(path: Path) -> tuple[dict, list[str]]:
+def parse_markdown(path: Path, standalone: bool = True) -> tuple[dict, list[str]]:
     errors: list[str] = []
     text = path.read_text(encoding="utf-8")
-    delivery_errors, _, _ = validate_delivery_md.validate(path)
+    # standalone 的语义与 validate_delivery_md 的 CLI 保持一致：
+    # 默认走流程时要查流程凭据，显式 --standalone 才只看文件本身。
+    delivery_errors, _, _ = validate_delivery_md.validate(path, standalone=standalone)
     errors.extend(f"{path.name}: {error}" for error in delivery_errors)
 
     episode_match = EPISODE_RE.search(text)
@@ -179,13 +181,15 @@ def collect_paths(inputs: list[Path]) -> list[Path]:
     return sorted(paths.resolve() for paths in paths)
 
 
-def audit(paths: list[Path]) -> tuple[list[str], list[str], dict[str, int]]:
+def audit(
+    paths: list[Path], standalone: bool = True
+) -> tuple[list[str], list[str], dict[str, int]]:
     errors: list[str] = []
     warnings: list[str] = []
     docs: list[dict] = []
     for path in paths:
         try:
-            doc, doc_errors = parse_markdown(path)
+            doc, doc_errors = parse_markdown(path, standalone)
         except (OSError, UnicodeError, ValueError) as exc:
             errors.append(f"{path}: 无法读取：{exc}")
             continue
@@ -324,12 +328,17 @@ def audit(paths: list[Path]) -> tuple[list[str], list[str], dict[str, int]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", nargs="+", type=Path)
+    parser.add_argument(
+        "--standalone",
+        action="store_true",
+        help="只检查文件本身，不查流程凭据（与 validate_delivery_md 同义）",
+    )
     args = parser.parse_args()
     paths = collect_paths(args.inputs)
     if not paths:
         print("ERROR: 没有找到待审核的 LibTV Markdown", file=sys.stderr)
         return 2
-    errors, warnings, summary = audit(paths)
+    errors, warnings, summary = audit(paths, args.standalone)
     for error in errors:
         print(f"ERROR: {error}")
     for warning in warnings:
