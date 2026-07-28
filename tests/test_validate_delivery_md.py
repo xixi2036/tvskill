@@ -140,6 +140,7 @@ VALID = """# EP01｜LibTV 完成提示词
 
 | 序号 | 原剧本声音 | 所在段 | 对账 |
 |---|---|---|---|
+| 1 | 李威：哼，装什么装！ | V01 | 逐字一致 |
 """
 
 
@@ -491,6 +492,24 @@ class DeliveryMarkdownTests(unittest.TestCase):
         _, warnings, _ = self.validate_text(candidate)
         self.assertFalse(any("inline HEX" in w for w in warnings))
         self.assertFalse(any("NOT 链" in w for w in warnings))
+
+    def test_empty_voice_ledger_is_rejected(self):
+        """空表头不构成对账——这张表此前正是因为没有行级检查而形同虚设。"""
+        invalid = VALID.replace(
+            "| 1 | 李威：哼，装什么装！ | V01 | 逐字一致 |\n", ""
+        )
+        self.assertTrue(any("语音对账没有有效对账行" in e for e in self.errors(invalid)))
+
+    def test_voice_ledger_checked_against_source(self):
+        errors = self.validate_text(VALID, self.SCRIPT)[0]
+        self.assertEqual(errors, [])
+
+    def test_dropped_voice_row_is_caught_against_source(self):
+        two_line_script = self.SCRIPT.replace(
+            "李威：哼，装什么装！\n", "李威：哼，装什么装！\n单知影：你，很吵。\n"
+        )
+        errors = self.validate_text(VALID, two_line_script)[0]
+        self.assertTrue(any("与原剧本实际台词数" in e for e in errors))
 
     def test_arbitrary_bracket_text_is_still_rejected(self):
         invalid = VALID.replace("【关键约束】机位铁律", "【标题：Z班开学】【关键约束】机位铁律")

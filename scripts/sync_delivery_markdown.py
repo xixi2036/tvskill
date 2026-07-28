@@ -266,7 +266,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("markdown", type=Path)
     parser.add_argument("--project", required=True)
-    parser.add_argument("--node-prefix", default="TVSkill-EP03-")
+    # 不给默认值：此前默认 "TVSkill-EP03-"，跑 EP07 会把节点命名成 TVSkill-EP03-V01，
+    # 随后 audit_canvas_nodes --name-prefix 要么审计不到，要么误伤 EP03 的真节点。
+    parser.add_argument(
+        "--node-prefix",
+        help="节点名前缀，例如 TVSkill-EP07-；缺省时按交付 Markdown 的集号推导",
+    )
     parser.add_argument("--node-suffix", default="-v3提示词")
     parser.add_argument("--only", help="仅同步指定段号，逗号分隔，例如 1,2,15")
     parser.add_argument("--libtv")
@@ -276,6 +281,13 @@ def main() -> int:
     libtv = args.libtv or shutil.which("libtv") or str(Path.home() / ".libtv" / "libtv")
     try:
         defaults, segments = parse_markdown(args.markdown)
+        if not args.node_prefix:
+            stem = args.markdown.name.split("-")[0]
+            if not re.fullmatch(r"EP\d+", stem):
+                raise ValueError(
+                    f"无法从文件名推导节点前缀（得到 {stem!r}）；请显式传 --node-prefix"
+                )
+            args.node_prefix = f"TVSkill-{stem}-"
         if args.only:
             selected = {f"{int(value):02d}" for value in args.only.split(",") if value.strip()}
             segments = [segment for segment in segments if segment["number"] in selected]

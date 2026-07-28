@@ -85,7 +85,7 @@ class PipelineStateTests(unittest.TestCase):
         self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
         ok, detail = self.check("coverage", None)
         self.assertFalse(ok)
-        self.assertIn("不对源就等于自证", detail)
+        self.assertIn("--script", detail)
 
     def test_prerequisites_block_skipping(self):
         state = {"episode": "EP01", "steps": {}, "deliveryHash": ""}
@@ -106,9 +106,33 @@ class PipelineStateTests(unittest.TestCase):
         self.delivery.write_text(ASSETS_FULL + "\n改了一个字\n", encoding="utf-8")
         dropped = MODULE.invalidate_stale(state, "EP01", self.dir)
         self.assertEqual(dropped, list(MODULE.CONTENT_SENSITIVE))
-        self.assertEqual(state["steps"]["validate"], "pending")
-        self.assertEqual(state["steps"]["entities"], "done")
+        # 交付 Markdown 是这些步骤的判据来源，改了就全部过期
+        for step in ("entities", "assets", "segments", "coverage", "validate"):
+            self.assertEqual(state["steps"][step], "pending", step)
+        # script_units 只依赖原剧本，不受交付物改动影响
+        self.assertEqual(state["steps"]["script_units"], "done")
 
+
+
+    def test_review_step_rejects_pending_audit_fields(self):
+        """「待二审」是打破死循环的中间态，不能一路混到交付。"""
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "assets" / "libtv-video-prompts.template.md"
+        ).read_text(encoding="utf-8")
+        self.delivery.write_text(template, encoding="utf-8")
+        ok, detail = MODULE.check_step("review", "EP01", self.dir, None, None)
+        self.assertFalse(ok, detail)
+        self.assertIn("待二审", detail)
+
+    def test_review_step_accepts_completed_audit(self):
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "assets" / "libtv-video-prompts.template.md"
+        ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
+        self.delivery.write_text(template, encoding="utf-8")
+        ok, detail = MODULE.check_step("review", "EP01", self.dir, None, None)
+        self.assertTrue(ok, detail)
 
 
 class DeliverableGateTests(unittest.TestCase):

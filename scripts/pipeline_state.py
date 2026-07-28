@@ -84,7 +84,13 @@ STEPS = [
 ]
 STEP_IDS = [step["id"] for step in STEPS]
 # 交付物内容变化后必须重走的步骤：校验结论不能比被校验的内容还旧。
-CONTENT_SENSITIVE = ("validate", "review", "canvas", "generate")
+# 交付 Markdown 是这些步骤的判据来源，内容一变，它们的结论就都过期了。
+# 只作废 validate 及下游是不够的：改完画面对账表后 coverage=done 会永久留存，
+# "逐条对源"的结论便能在任意后续编辑后原样存活。
+CONTENT_SENSITIVE = (
+    "entities", "assets", "segments", "coverage",
+    "validate", "review", "canvas", "generate",
+)
 MANUAL_STEPS = ("review", "canvas", "generate")
 
 
@@ -225,13 +231,29 @@ def check_step(
         return True, "生成段与提示词已就位"
 
     if step_id in ("coverage", "validate"):
-        if step_id == "coverage" and not script:
-            return False, "必须用 --script 指定原剧本，画面对账不对源就等于自证"
+        if not script:
+            return False, (
+                "必须用 --script 指定原剧本：不对源时画面对账只会降级成一条警告，"
+                "整表可以是编的"
+            )
         ok, output = run_validator(delivery, script, episode_no)
         if step_id == "coverage":
+            error_lines = [
+                line for line in output.splitlines() if line.startswith("ERROR")
+            ]
+            # 致命错误必须先抛：集号传错会导致一条画面单元都抽不到，
+            # 此时"对源比对"一行都没跑过，绝不能因为没有画面对账类错误就放行。
+            fatal = [
+                line for line in error_lines
+                if any(mark in line for mark in (
+                    "没有抽到画面单元", "无法读取原剧本", "无法加载 extract_script_units",
+                ))
+            ]
+            if fatal:
+                return False, "\n".join(fatal)
             coverage_errors = [
-                line for line in output.splitlines()
-                if line.startswith("ERROR") and ("画面对账" in line or "拆节点" in line)
+                line for line in error_lines
+                if "画面对账" in line or "拆节点" in line
             ]
             if coverage_errors:
                 return False, "\n".join(coverage_errors)
@@ -242,6 +264,15 @@ def check_step(
         ok, output = run_validator(delivery, script, episode_no)
         if not ok:
             return False, f"上游确定性校验已失效，先修好再推进：\n{output}"
+        if step_id == "review":
+            # 「待二审」是为了打破"必须先自称已通过才能过机器闸"的死循环而存在的
+            # 中间态；二审这一步完成时必须已经改成「已通过」，否则它会一路混到交付。
+            pending = re.findall(r"^- (全剧二审|提示词二审)：待二审$", text, re.M)
+            if pending:
+                return False, (
+                    f"仍有 {len(pending)} 处二审字段停留在「待二审」；"
+                    "完成七遍语义二审后请改为「已通过」再 complete"
+                )
         return True, "机器闸通过；本步需由人确认后显式 complete"
 
     return False, f"未知步骤：{step_id}"
@@ -276,9 +307,12 @@ def cmd_status(args, state: dict) -> int:
     print(f"  本步闸：{next_step['gate']}")
     if blocked:
         print(f"  ⚠ 前置未完成：{blocked}")
+    # 必须带上用户本次传的 --dir：否则照提示继续会跑到 cwd，
+    # 在错误目录新建状态文件，导致状态分叉。
+    dir_flag = f" --dir {args.dir}" if str(args.dir) != "." else ""
     print(
         f"  跑闸：python3 scripts/pipeline_state.py check {args.episode} "
-        f"{next_step['id']} [--script 原剧本 --episode-no N]"
+        f"{next_step['id']}{dir_flag} --script <原剧本> --episode-no <集号数字>"
     )
     return 0
 

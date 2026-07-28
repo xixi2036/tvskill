@@ -62,10 +62,13 @@ SERIES_COUNT_RE = re.compile(r"^- 全剧集数：(\d+|未知)$", re.M)
 TIMELINE_ANCHOR_RE = re.compile(r"^- 剧情时间锚：(.+)$", re.M)
 PREVIOUS_EPISODE_RE = re.compile(r"^- 前集承接：(.+)$", re.M)
 EPISODE_ENDPOINT_RE = re.compile(r"^- 本集最终出点：(.+)$", re.M)
-SERIES_REVIEW_RE = re.compile(r"^- 全剧二审：已通过$", re.M)
+# 二审字段取值域必须含「待二审」：确定性校验若要求文档先自称"已通过"才肯给 0，
+# 而规则又规定"校验通过后才能这么写"，就成了逻辑死循环，逼所有人先写假状态。
+# 正确的次序是：机器闸先过 → 人做二审 → 再改成已通过。
+SERIES_REVIEW_RE = re.compile(r"^- 全剧二审：(已通过|待二审)$", re.M)
 CONTINUITY_GROUP_RE = re.compile(r"^- 连续组：(.+)$", re.M)
 PREDECESSOR_SEGMENT_RE = re.compile(r"^- 前置段：(.+)$", re.M)
-PROMPT_REVIEW_RE = re.compile(r"^- 提示词二审：已通过$", re.M)
+PROMPT_REVIEW_RE = re.compile(r"^- 提示词二审：(已通过|待二审)$", re.M)
 TOTAL_DURATION_RE = re.compile(r"^- 总时长：(\d+)秒$", re.M)
 SEGMENT_COUNT_RE = re.compile(r"^- 生成段：(\d+)个$", re.M)
 MODEL_RE = re.compile(r"^- 模型：(.+)$", re.M)
@@ -84,6 +87,10 @@ REQUIRED_SECTIONS = (
     "## 段间衔接总表",
     "## 语音对账",
     "## 画面对账",
+)
+VOICE_ROW_RE = re.compile(
+    r"^\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|$",
+    re.M,
 )
 COVERAGE_ROW_RE = re.compile(
     r"^\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|$",
@@ -109,7 +116,9 @@ BANNED_DELIVERY = (
 )
 BANNED_PROMPT_PATTERNS = (
     (re.compile(r"@(?:图片|视频|音频)\d+"), "旧式 @图片N/@视频N/@音频N"),
-    (re.compile(r"\b(?:TODO|TBD|DURATION_SEC)\b", re.I), "待办或内部变量"),
+    # 同样不能用 \b：「时长DURATION_SEC秒」两侧都是中文，边界不成立。
+    (re.compile(r"(?<![A-Za-z])(?:TODO|TBD|DURATION_SEC)(?![A-Za-z])", re.I),
+     "待办或内部变量"),
     (re.compile(r"【空间锚点"), "旧式空间锚点字段"),
 )
 BRACKET_RE = re.compile(r"【[^】]*】")
@@ -176,6 +185,10 @@ CROWD_HIERARCHY_RE = re.compile(
     r"其余.{0,28}(?:呼吸|眨眼|微动|视线漂移|保持)|"
     r"(?:反应|动作).{0,12}错开"
 )
+# 媒介四选一。此前写死"真人实拍"，导致 skill 自己 description 里承诺的
+# 2D 动漫 / 3D CG 剧集没有任何合法路径通过校验——除非在动漫提示词里硬塞
+# "真人实拍"四个字，那又违反"媒介与资产图一致"。
+MEDIUM_RE = re.compile(r"真人实拍|2D\s*动漫|二维动漫|3D\s*CG|三维动画|定格动画")
 PHYSICAL_LIGHT_RE = re.compile(
     # 自然光与灯具
     r"窗光|日光|阳光|月光|月色|自然光|晨光|暮光|夕阳|天光|逆光|侧光|顶光"
@@ -290,6 +303,45 @@ def audio_control_subjects(prompt: str) -> set[str]:
     }
 
 
+def check_voice_against_script(
+    voice_rows: list[tuple[int, str, str, str]],
+    script: Path,
+    episode: int | None,
+) -> list[str]:
+    """语音对账同样必须对源。
+
+    此前这张表只是个必需章节，没有任何行级检查——空表头也能通过。
+    所谓"台词零丢失是因为有对账表"其实不成立：那张表和当年的画面一样只活在自觉里。
+    """
+    errors: list[str] = []
+    try:
+        import extract_script_units
+    except ImportError:
+        return ["无法加载 extract_script_units，语音对账对源校验未执行"]
+    try:
+        paragraphs = extract_script_units.read_paragraphs(script)
+    except (OSError, KeyError, UnicodeError) as exc:
+        return [f"无法读取原剧本 {script}：{exc}"]
+    units = extract_script_units.extract(
+        paragraphs, episode, extract_script_units.VOICE_KINDS
+    )
+    if not units:
+        return [f"原剧本 {script} 中没有抽到任何台词，请确认集号"]
+    if len(units) != len(voice_rows):
+        errors.append(
+            f"语音对账行数 {len(voice_rows)} 与原剧本实际台词数 {len(units)} 不一致；"
+            "缺行即为台词丢失，必须逐句补齐"
+        )
+    for unit, row in zip(units, voice_rows):
+        if normalized_source(str(unit["text"])) != normalized_source(row[1]):
+            errors.append(
+                f"语音对账第 {row[0]} 行原文与剧本不符：\n"
+                f"    剧本：{unit['text']}\n"
+                f"    对账：{row[1]}"
+            )
+    return errors
+
+
 def normalized_source(text: str) -> str:
     return re.sub(r"[\s　“”\"'‘’|｜]", "", text)
 
@@ -399,7 +451,7 @@ def validate(
         ("剧情时间锚", TIMELINE_ANCHOR_RE),
         ("前集承接", PREVIOUS_EPISODE_RE),
         ("本集最终出点", EPISODE_ENDPOINT_RE),
-        ("全剧二审：已通过", SERIES_REVIEW_RE),
+        ("全剧二审（已通过／待二审）", SERIES_REVIEW_RE),
     ):
         if not pattern.search(text):
             errors.append(f"全剧连续性声明缺少或错误：{field_name}")
@@ -476,7 +528,7 @@ def validate(
         if not PREDECESSOR_SEGMENT_RE.search(section):
             errors.append(f"{label} 缺少前置段")
         if not PROMPT_REVIEW_RE.search(section):
-            errors.append(f"{label} 提示词二审未标记为已通过")
+            errors.append(f"{label} 缺少提示词二审字段（已通过／待二审）")
         if "### 状态交接" not in section:
             errors.append(f"{label} 缺少状态交接")
         elif "| 连续键 | 入点状态 | 出点状态 |" not in section:
@@ -644,8 +696,11 @@ def validate(
 
         if "：“" in prompt or "：\"" in prompt:
             errors.append(f"{label} 台词必须使用 {{精确原文}}，不能使用引号台词")
-        if "真人实拍" not in prompt:
-            errors.append(f"{label} 缺少真人实拍媒介说明")
+        if not MEDIUM_RE.search(prompt):
+            errors.append(
+                f"{label} 缺少媒介声明（真人实拍／2D 动漫／3D CG／定格动画／其它，"
+                "全剧统一且中途不更换）"
+            )
         if not PHYSICAL_LIGHT_RE.search(prompt):
             errors.append(f"{label} 缺少可识别的物理光源")
         slop_count = sum(term in prompt for term in SLOP_TERMS)
@@ -743,7 +798,10 @@ def validate(
                 errors.append(f"{label} 同步对白使用冻结式说完落点，应改为呼吸、倾听或继续原动作")
             for block in sync_blocks:
                 control_clauses = [
-                    clause for clause in re.split(r"[，；。]", block)
+                    # 真实提示词压倒性使用半角逗号，且是多行文本块；
+                    # 只按全角标点切分会让整块 800 字返回成一个子句，
+                    # 这条规则在真实语料上等于死代码。
+                    clause for clause in re.split(r"[，；。,;\n、]", block)
                     if VOICE_DIRECTION_RE.search(clause)
                 ]
                 if len(control_clauses) > 1:
@@ -893,6 +951,28 @@ def validate(
             )
         else:
             errors.extend(check_coverage_against_script(coverage_rows, script, episode))
+
+    voice_rows = [
+        (int(index_text), source.strip(), segment_text.strip(), result.strip())
+        for index_text, source, segment_text, result in VOICE_ROW_RE.findall(
+            subsection(text, "## 语音对账")
+        )
+    ]
+    if not voice_rows:
+        errors.append(
+            "语音对账没有有效对账行：原剧本每句台词/OS/VO/旁白都要有一行，"
+            "空表头不构成对账"
+        )
+    else:
+        if [row[0] for row in voice_rows] != list(range(1, len(voice_rows) + 1)):
+            errors.append("语音对账序号必须从 1 连续递增，且与原剧本顺序一致")
+        for row_index, _, segment_text, result in voice_rows:
+            if not segment_text:
+                errors.append(f"语音对账第 {row_index} 行没有写所在段")
+            if not result:
+                errors.append(f"语音对账第 {row_index} 行没有写对账结果")
+        if script is not None:
+            errors.extend(check_voice_against_script(voice_rows, script, episode))
 
     count_match = SEGMENT_COUNT_RE.search(text)
     if not count_match:

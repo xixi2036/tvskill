@@ -16,18 +16,53 @@ import zipfile
 from pathlib import Path
 
 
-EPISODE_RE = re.compile(r"^第\s*(\d+)\s*集\s*$")
-SCENE_RE = re.compile(r"^(\d+)-(\d+)\s+(.+)$")
+# 集号行允许同行带标题（「第1集 开局系统」），也接受中文数字。
+# 原先要求整行只有集号，遇到带标题的剧本会一条单元都抽不到，
+# 而报错信息说的是"请确认集号"，把人引向错误方向。
+EPISODE_RE = re.compile(r"^第\s*([0-9〇零一二三四五六七八九十百]+)\s*集(?:\s|$)")
+# 场次号与描述之间不强制空白：中文剧本常写「1-2课间走廊 日 内」。
+# 原先漏匹配时该行被静默丢弃且 current_scene 不更新，
+# 导致其后所有画面单元被错误归属到上一场——比丢一行更难发现。
+SCENE_RE = re.compile(r"^(\d+)-(\d+)\s*(\S.*)$")
 SUBTITLE_RE = re.compile(r"【字幕[：:]([^】]*)】")
 UI_PANEL_RE = re.compile(
     r"^【(?:第[^】]*任务|目标[：:]|任务时限|系统提示|检测到|.*好感度)[^】]*】$"
 )
-SFX_MARK_RE = re.compile(r"^△\s*【音效】")
+# 音效标签后常带内容：【音效：玻璃碎裂】。与 SUBTITLE_RE 同样收全半角冒号。
+SFX_MARK_RE = re.compile(r"^△\s*【音效[：:）)]?")
 VISUAL_PREFIX_RE = re.compile(r"^△")
 BRACKET_LINE_RE = re.compile(r"^【([^】]*)】$")
 # 剧本里的台词行（`角色名：台词`），与 _shared_patterns.DIALOGUE_RE（提示词里的
 # `{}` 台词真值锁）语义完全不同，故不同名，避免被误当成同一判据。
+# 场次元信息行（人物表/场景/时间），形式上像台词行但不是台词。
+META_LINE_RE = re.compile(r"^(?:人物|角色|场景|地点|时间|时间地点|服装|道具)\s*[：:]")
 SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^△【\s][^：:]{0,12}(?:VO)?(?:（[^）]*）)?[：:]")
+
+
+CN_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def parse_episode_number(text: str) -> int | None:
+    """集号可能写成阿拉伯数字或中文数字（第一集 / 第十二集）。"""
+    if text.isdigit():
+        return int(text)
+    total = 0
+    section = 0
+    for char in text:
+        if char in CN_DIGITS:
+            section = CN_DIGITS[char]
+        elif char == "十":
+            section = (section or 1) * 10
+            total += section
+            section = 0
+        elif char == "百":
+            section = (section or 1) * 100
+            total += section
+            section = 0
+        else:
+            return None
+    return total + section or None
 
 
 def docx_paragraphs(path: Path) -> list[str]:
@@ -67,14 +102,25 @@ def classify(text: str) -> str:
     return ""
 
 
-def extract(paragraphs: list[str], episode: int | None) -> list[dict[str, object]]:
+VISUAL_KINDS = ("visual", "subtitle", "sfx", "note", "ui")
+VOICE_KINDS = ("dialogue",)
+
+
+def extract(
+    paragraphs: list[str],
+    episode: int | None,
+    kinds: tuple[str, ...] = VISUAL_KINDS,
+) -> list[dict[str, object]]:
     units: list[dict[str, object]] = []
     current_episode: int | None = None
     current_scene = ""
     for text in paragraphs:
         episode_match = EPISODE_RE.match(text)
         if episode_match:
-            current_episode = int(episode_match.group(1))
+            parsed = parse_episode_number(episode_match.group(1))
+            if parsed is None:
+                continue
+            current_episode = parsed
             current_scene = ""
             continue
         scene_match = SCENE_RE.match(text)
@@ -83,7 +129,19 @@ def extract(paragraphs: list[str], episode: int | None) -> list[dict[str, object
             continue
         if episode is not None and current_episode != episode:
             continue
+        if META_LINE_RE.match(text):
+            continue
         if SCRIPT_DIALOGUE_LINE_RE.match(text):
+            # 台词行同样入库（kind=dialogue），供语音对账对源；
+            # 默认输出只含画面类，画面对账的条数不受影响。
+            units.append(
+                {
+                    "episode": current_episode,
+                    "scene": current_scene,
+                    "kind": "dialogue",
+                    "text": text,
+                }
+            )
             continue
 
         # 一条画面行里内嵌的【字幕：…】是独立任务（后期叠字），单独成行；
@@ -109,9 +167,10 @@ def extract(paragraphs: list[str], episode: int | None) -> list[dict[str, object
                     "text": f"【字幕：{subtitle}】",
                 }
             )
-    for index, unit in enumerate(units, start=1):
+    selected = [unit for unit in units if unit["kind"] in kinds]
+    for index, unit in enumerate(selected, start=1):
         unit["index"] = index
-    return units
+    return selected
 
 
 def render_table(units: list[dict[str, object]]) -> str:
@@ -134,13 +193,24 @@ def main() -> int:
     parser.add_argument(
         "--format", choices=("json", "table", "count"), default="json"
     )
+    parser.add_argument(
+        "--kind",
+        choices=("visual", "voice", "all"),
+        default="visual",
+        help="visual=画面/字幕/音效（画面对账用）；voice=台词（语音对账用）",
+    )
     args = parser.parse_args()
     try:
         paragraphs = read_paragraphs(args.script)
     except (OSError, KeyError, zipfile.BadZipFile, UnicodeError) as exc:
         print(f"ERROR: 无法读取剧本：{exc}", file=sys.stderr)
         return 1
-    units = extract(paragraphs, args.episode)
+    kinds = {
+        "visual": VISUAL_KINDS,
+        "voice": VOICE_KINDS,
+        "all": VISUAL_KINDS + VOICE_KINDS,
+    }[args.kind]
+    units = extract(paragraphs, args.episode, kinds)
     if not units:
         print("ERROR: 没有抽到任何画面单元，请确认集号与剧本格式", file=sys.stderr)
         return 1
