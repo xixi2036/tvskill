@@ -8,6 +8,23 @@ import re
 import sys
 from pathlib import Path
 
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _shared_patterns import (  # noqa: E402
+    OS_VO_RE,
+    DIALOGUE_RE,
+    EXACT_SHOT_RE,
+    EXACT_SHOT_BLOCK_RE,
+    VOICE_SLOT_RE,
+    CLASSROOM_RE,
+    FRONT_BOARD_RE,
+    SEAT_BOARD_RE,
+    LOWER_BODY_LOCK_RE,
+    EMPTY_SCENE_RE,
+)
+
 
 SEGMENT_HEADING_RE = re.compile(r"^## 生成段 V(\d{2})｜(.+)$", re.M)
 PROMPT_BLOCK_RE = re.compile(
@@ -21,10 +38,6 @@ MIXED_ROW_RE = re.compile(
 MIXED_TOKEN_RE = re.compile(r"\{\{Mixed (\d+)\}\}")
 SEMANTIC_BINDING_RE = re.compile(r"@\[([^\]]+)\]\s*\{\{Mixed (\d+)\}\}")
 SEMANTIC_NAME_RE = re.compile(r"@\[([^\]]+)\]")
-EXACT_SHOT_RE = re.compile(r"^Shot\s+(\d+):", re.M)
-EXACT_SHOT_BLOCK_RE = re.compile(
-    r"^Shot\s+\d+:.*?(?=^Shot\s+\d+:|\Z)", re.M | re.S
-)
 LEGACY_SHOT_RE = re.compile(r"^镜头\s*(\d+)\s*：", re.M)
 LEGACY_SHOT_BLOCK_RE = re.compile(
     r"^镜头\s*\d+\s*：.*?(?=^镜头\s*\d+\s*：|\Z)", re.M | re.S
@@ -32,7 +45,6 @@ LEGACY_SHOT_BLOCK_RE = re.compile(
 CONTINUOUS_TAKE_RE = re.compile(
     r"单一连续镜头[，,、 ]*无剪切|single continuous take,\s*no cuts", re.I
 )
-DIALOGUE_RE = re.compile(r"(?<!\{)\{([^{}\n]+)\}(?!\})")
 DURATION_RE = re.compile(r"^- 时长：(\d+)秒$", re.M)
 VOICE_STATUS_RE = re.compile(r"^- 音色状态：(.+)$", re.M)
 DELIVERY_GRADE_RE = re.compile(r"^- 交付等级：(预览|正式)$", re.M)
@@ -110,7 +122,6 @@ INLINE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}(?![0-9A-Fa-f])")
 NAMED_IRON_RULE_RE = re.compile(r"[^\s，。；：]{2,12}铁律")
 # NOT 后面未必有空格：中文语料里普遍写成 NOT卡通渲染+NOT三维动画。
 NOT_CHAIN_RE = re.compile(r"NOT\s*\S+.{0,80}?NOT\s*\S+", re.S | re.I)
-VOICE_SLOT_RE = re.compile(r"待上传|占位")
 VOICE_PENDING_STATUS_RE = re.compile(r"待关联")
 EYE_TARGET_RE = re.compile(
     r"(?:视线|目光)(?:始终)?(?:落在|落向|锁在|锁定|停在|停向|投向|移向|固定在)"
@@ -142,23 +153,7 @@ CLEAN_FRAME_BINDING_RE = re.compile(r"@\[(?:首帧|续接帧)-[^\]]+\]\s*\{\{Mix
 CROWD_STATE_BINDING_RE = re.compile(
     r"@\[(?:场景状态|人群状态|群演状态|占座)-[^\]]+\]\s*\{\{Mixed \d+\}\}"
 )
-EMPTY_SCENE_RE = re.compile(r"空教室|空场景|空房间|无人物(?:教室|场景|空间)")
 WIDE_SHOT_RE = re.compile(r"大全景|中全景|全景")
-CLASSROOM_RE = re.compile(r"教室|课堂|黑板|讲台")
-FRONT_BOARD_RE = re.compile(
-    r"(?:黑板.{0,16}(?:前墙|教室前方)|(?:前墙|教室前方).{0,16}黑板)"
-)
-SEAT_BOARD_RE = re.compile(
-    r"(?:课桌|座椅|骨盆|髋部|膝盖|双脚|学生.{0,8}(?:身体|下半身))"
-    r".{0,36}(?:面向|朝向|朝着).{0,12}(?:黑板|讲台|前墙)"
-)
-LOWER_BODY_LOCK_RE = re.compile(
-    r"(?:(?:骨盆|髋部|膝盖|双脚|坐姿).{0,32}(?:保持|固定|仍|始终).{0,16}"
-    r"(?:黑板|前方|不变)|(?:只让|仅让|只移动|仅移动|只转动|仅转动)"
-    r".{0,4}(?:眼睛|视线|头部|侧头))"
-)
-# 注意不能用 \b：中文与字母相邻时不构成词边界，"系统VO" 里的 VO 会漏判。
-OS_VO_RE = re.compile(r"(?<![A-Za-z])(?:OS|VO)(?![A-Za-z])|内心|画外音|旁白", re.I)
 COMPETING_DIALOGUE_ACTION_RE = re.compile(
     r"走入|走向|行走|转身|递给|递出|推向|飞出|飞向|撞上|扎入|掠过|"
     r"全班.{0,12}(?:转头|安静|反应)|众人.{0,12}(?:转头|安静|反应)|"

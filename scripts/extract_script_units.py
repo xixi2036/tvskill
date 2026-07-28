@@ -25,7 +25,9 @@ UI_PANEL_RE = re.compile(
 SFX_MARK_RE = re.compile(r"^△\s*【音效】")
 VISUAL_PREFIX_RE = re.compile(r"^△")
 BRACKET_LINE_RE = re.compile(r"^【([^】]*)】$")
-DIALOGUE_RE = re.compile(r"^[^△【\s][^：:]{0,12}(?:VO)?(?:（[^）]*）)?[：:]")
+# 剧本里的台词行（`角色名：台词`），与 _shared_patterns.DIALOGUE_RE（提示词里的
+# `{}` 台词真值锁）语义完全不同，故不同名，避免被误当成同一判据。
+SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^△【\s][^：:]{0,12}(?:VO)?(?:（[^）]*）)?[：:]")
 
 
 def docx_paragraphs(path: Path) -> list[str]:
@@ -81,7 +83,7 @@ def extract(paragraphs: list[str], episode: int | None) -> list[dict[str, object
             continue
         if episode is not None and current_episode != episode:
             continue
-        if DIALOGUE_RE.match(text):
+        if SCRIPT_DIALOGUE_LINE_RE.match(text):
             continue
 
         # 一条画面行里内嵌的【字幕：…】是独立任务（后期叠字），单独成行；

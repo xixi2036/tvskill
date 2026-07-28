@@ -14,6 +14,23 @@ import subprocess
 import sys
 from typing import Any
 
+import sys as _sys
+from pathlib import Path as _Path
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+from _shared_patterns import (  # noqa: E402
+    OS_VO_RE,
+    DIALOGUE_RE,
+    EXACT_SHOT_RE,
+    EXACT_SHOT_BLOCK_RE,
+    PLANNING_RE,
+    CLASSROOM_RE,
+    FRONT_BOARD_RE,
+    SEAT_BOARD_RE,
+    LOWER_BODY_LOCK_RE,
+    EMPTY_SCENE_RE,
+)
+
 
 BRACKET_BINDING_RE = re.compile(
     r"@\[(?P<label>[^\]]+)\]\s*\{\{Mixed\s+(?P<number>\d+)\}\}"
@@ -21,37 +38,14 @@ BRACKET_BINDING_RE = re.compile(
 PAREN_BINDING_RE = re.compile(
     r"@(?P<label>[^@\n(){}]{1,80})\(\{\{Mixed\s+(?P<number>\d+)\}\}\)"
 )
-DIALOGUE_RE = re.compile(r"(?<!\{)\{([^{}\n]+)\}(?!\})")
 SYNC_CUE_RE = re.compile(r"(?:他说|她说|开口说|说出).{0,12}\{")
-OS_VO_RE = re.compile(r"\b(?:OS|VO)\b|内心|画外音|旁白", re.I)
 CHINESE_SHOT_RE = re.compile(r"^镜头\s*(\d+)\s*：", re.M)
-EXACT_SHOT_RE = re.compile(r"^Shot\s+(\d+):", re.M)
-EXACT_SHOT_BLOCK_RE = re.compile(
-    r"^Shot\s+\d+:.*?(?=^Shot\s+\d+:|\Z)", re.M | re.S
-)
 CONTINUOUS_RE = re.compile(r"单一连续镜头[，,、 ]*无剪切|single continuous take,\s*no cuts", re.I)
-PLANNING_RE = re.compile(
-    r"位置图|轨迹图|构图图|动线图|平面图|俯视图|机位图|箭头|虚线|假人|色块|网格|文字标注"
-)
 CLEAN_FRAME_RE = re.compile(r"首帧|续接帧|验收末帧|稳定末帧")
 CROWD_RE = re.compile(r"学生|众人|人群|群演|全班|全场")
 WIDE_RE = re.compile(r"大全景|中全景|全景")
-EMPTY_SCENE_RE = re.compile(r"无人物|空教室|空场景|空房间")
-CLASSROOM_RE = re.compile(r"教室|课堂|黑板|讲台")
 OCCUPIED_SCENE_RE = re.compile(r"占座|人群状态|群演状态|教学朝向")
-FRONT_BOARD_RE = re.compile(
-    r"(?:黑板.{0,16}(?:前墙|教室前方)|(?:前墙|教室前方).{0,16}黑板)"
-)
-SEAT_BOARD_RE = re.compile(
-    r"(?:课桌|座椅|骨盆|髋部|膝盖|双脚|学生.{0,8}(?:身体|下半身))"
-    r".{0,36}(?:面向|朝向|朝着).{0,12}(?:黑板|讲台|前墙)"
-)
 GROUP_REACTION_RE = re.compile(r"转头|侧头|回看|看向|视线|安静|停笔")
-LOWER_BODY_LOCK_RE = re.compile(
-    r"(?:(?:骨盆|髋部|膝盖|双脚|坐姿).{0,32}(?:保持|固定|仍|始终).{0,16}"
-    r"(?:黑板|前方|不变)|(?:只让|仅让|只移动|仅移动|只转动|仅转动)"
-    r".{0,4}(?:眼睛|视线|头部|侧头))"
-)
 EXACT_TEXT_RE = re.compile(
     r"文字以本提示词指定|清晰显示且只显示|必须(?:生成|出现|显示).{0,18}文字|"
     r"纸面.{0,12}(?:显示|写出).{0,30}[“\"]"

@@ -12,6 +12,14 @@ import subprocess
 import sys
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shared_patterns import (  # noqa: E402
+    DIALOGUE_RE,
+    OS_VO_RE,
+    PLANNING_RE,
+    VOICE_SLOT_RE,
+)
+
 import audit_canvas_nodes
 
 
@@ -23,13 +31,6 @@ MIXED_RE = re.compile(
     r"^\| Mixed (\d+) \|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|$",
     re.M,
 )
-TEXT_VOICE_RE = re.compile(r"(?<!\{)\{[^{}\n]+\}(?!\})|\b(?:OS|VO)\b|内心|画外音|旁白", re.I)
-VOICE_SLOT_RE = re.compile(r"待上传|占位")
-PLANNING_RE = re.compile(
-    r"位置图|轨迹图|构图图|动线图|平面图|俯视图|机位图|箭头|虚线|假人|色块|网格|文字标注"
-)
-
-
 def compact(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -93,7 +94,10 @@ def parse_markdown(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
         run_status = scalar(block, "运行状态")
         audio_rows = [row for row in rows if "音频" in row["mediaType"]]
         planning_rows = [row["asset"] for row in rows if PLANNING_RE.search(row["asset"])]
-        has_text_voice = bool(TEXT_VOICE_RE.search(prompt_match.group(1)))
+        prompt_text = prompt_match.group(1)
+        has_text_voice = bool(
+            DIALOGUE_RE.search(prompt_text) or OS_VO_RE.search(prompt_text)
+        )
         voice_slots = [
             row["asset"] for row in audio_rows
             if VOICE_SLOT_RE.search(f"{row['asset']} {row['mediaType']}")
