@@ -66,11 +66,28 @@ ABSOLUTE_TIME_RE = re.compile(
 REQUIRED_SECTIONS = (
     "## 使用方法",
     "## 公共素材清单",
+    "## 资产清单",
     "## 全剧连续性声明",
     "## 全剧连续性母版",
     "## 段间衔接总表",
     "## 语音对账",
+    "## 画面对账",
 )
+COVERAGE_ROW_RE = re.compile(
+    r"^\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|$",
+    re.M,
+)
+ASSET_ROW_RE = re.compile(
+    r"^\|\s*(人物|场景|道具|色卡)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|$",
+    re.M,
+)
+LANDING_RE = re.compile(r"V(\d{2})-Shot(\d+)")
+DISPOSITION_KINDS = ("已落实", "合并", "转后期叠字", "舍弃")
+EXACT_TEXT_PROP_RE = re.compile(r"含精确文字|精确可见文字")
+# 多镜节点里，单个 Shot 塞进 3 条及以上原剧本画面指令即判定为把该切的镜合并了。
+MAX_UNITS_PER_SHOT = 2
+# 连续单镜本就是"一镜演完一串动作"，天然承载更多画面指令，放宽且只提示不拦截。
+MAX_UNITS_PER_CONTINUOUS_TAKE = 4
 BANNED_DELIVERY = (
     "candidate.json",
     "asset-plan.json",
@@ -195,6 +212,8 @@ def subsection(text: str, heading: str) -> str:
 def binding_category(name: str) -> str:
     if "音色" in name or "声音" in name or "台词音频" in name:
         return "audio"
+    if "色卡" in name:
+        return "colorcard"
     if name.startswith("场景-") or name.startswith("场景状态-") or name.startswith("人群状态-"):
         return "scene"
     if name.startswith("首帧-") or name.startswith("续接帧-"):
@@ -243,7 +262,48 @@ def audio_control_subjects(prompt: str) -> set[str]:
     ))
 
 
-def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
+def normalized_source(text: str) -> str:
+    return re.sub(r"[\s　“”\"'‘’|｜]", "", text)
+
+
+def check_coverage_against_script(
+    coverage_rows: list[tuple[int, str, str, str, str]],
+    script: Path,
+    episode: int | None,
+) -> list[str]:
+    """用抽取器重新解析原剧本，逐行核对对账表——不信任表里自报的任何数字。"""
+    errors: list[str] = []
+    try:
+        import extract_script_units
+    except ImportError:
+        return ["无法加载 extract_script_units，覆盖度对源校验未执行"]
+    try:
+        paragraphs = extract_script_units.read_paragraphs(script)
+    except (OSError, KeyError, UnicodeError) as exc:
+        return [f"无法读取原剧本 {script}：{exc}"]
+    units = extract_script_units.extract(paragraphs, episode)
+    if not units:
+        return [f"原剧本 {script} 中没有抽到画面单元，请确认集号"]
+    if len(units) != len(coverage_rows):
+        errors.append(
+            f"画面对账行数 {len(coverage_rows)} 与原剧本实际画面单元数 {len(units)} 不一致；"
+            "缺行即为画面丢失，必须逐条补齐"
+        )
+    for unit, row in zip(units, coverage_rows):
+        expected = normalized_source(str(unit["text"]))
+        actual = normalized_source(row[2])
+        if expected != actual:
+            errors.append(
+                f"画面对账第 {row[0]} 行原文与剧本不符：\n"
+                f"    剧本：{unit['text']}\n"
+                f"    对账：{row[2]}"
+            )
+    return errors
+
+
+def validate(
+    path: Path, script: Path | None = None, episode: int | None = None
+) -> tuple[list[str], list[str], dict[str, int]]:
     errors: list[str] = []
     warnings: list[str] = []
     text = path.read_text(encoding="utf-8")
@@ -296,6 +356,11 @@ def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
         errors.append("没有找到生成段章节")
 
     durations: list[int] = []
+    shots_by_segment: dict[str, int] = {}
+    continuous_take_segments: dict[str, bool] = {}
+    segments_with_color_card: dict[str, bool] = {}
+    text_strategy_by_segment: dict[str, str] = {}
+    segment_asset_names: dict[str, list[str]] = {}
     for index, match in enumerate(matches, start=1):
         expected = f"{index:02d}"
         actual = match.group(1)
@@ -442,6 +507,14 @@ def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
             errors.append(f"{label} 提示词引用了规划图、标记图或位置示意资产")
 
         shots = [int(number) for number in EXACT_SHOT_RE.findall(prompt)]
+        shots_by_segment[actual] = len(shots) if shots else 1
+        continuous_take_segments[actual] = not shots
+        color_card_rows = [
+            row for row in rows if "色卡" in f"{row[1]} {row[3]}"
+        ]
+        segments_with_color_card[actual] = bool(color_card_rows)
+        text_strategy_by_segment[actual] = text_strategy
+        segment_asset_names[actual] = [row[1] for row in rows]
         legacy_shots = [int(number) for number in LEGACY_SHOT_RE.findall(prompt)]
         continuous_take = bool(CONTINUOUS_TAKE_RE.search(prompt))
         if legacy_shots:
@@ -621,6 +694,129 @@ def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
                         f"{label} 教室群像反应未声明只转眼/头/肩并保持骨盆、膝盖和坐姿朝向"
                     )
 
+    asset_rows = [
+        (kind.strip(), name.strip(), form.strip(), note.strip())
+        for kind, name, form, note in ASSET_ROW_RE.findall(
+            subsection(text, "## 资产清单")
+        )
+    ]
+    if not asset_rows:
+        errors.append("资产清单没有有效资产行")
+    prop_rows = [row for row in asset_rows if row[0] == "道具"]
+    color_card_rows = [row for row in asset_rows if row[0] == "色卡"]
+    if not prop_rows:
+        warnings.append(
+            "资产清单没有登记任何道具；若本集确无承担叙事功能的道具请忽略，"
+            "否则按实体提取合同补登记（精确文字道具必须走定版道具图）"
+        )
+    for _, name, _, note in prop_rows:
+        if not EXACT_TEXT_PROP_RE.search(note):
+            continue
+        holders = [
+            number for number, assets in segment_asset_names.items()
+            if any(name in asset for asset in assets)
+        ]
+        if not holders:
+            errors.append(
+                f"道具「{name}」标注含精确文字，必须有定版道具图并绑进对应段的 Mixed，"
+                "当前没有任何段绑定它"
+            )
+            continue
+        for number in holders:
+            if text_strategy_by_segment.get(number) != "定版道具图":
+                errors.append(
+                    f"V{number} 绑定了含精确文字的道具「{name}」，文字策略必须为定版道具图"
+                )
+    if color_card_rows:
+        missing_color_card = sorted(
+            number for number, bound in segments_with_color_card.items() if not bound
+        )
+        if missing_color_card:
+            errors.append(
+                "资产清单已登记色卡，以下段却未绑定任何色卡资产："
+                f"{['V' + number for number in missing_color_card]}；"
+                "色卡必须作为视觉锚定绑进 Mixed，只在提示词里写 HEX 不成立"
+            )
+
+    coverage_rows = [
+        (int(index_text), kind.strip(), source.strip(), landing.strip(), disposition.strip())
+        for index_text, kind, source, landing, disposition in COVERAGE_ROW_RE.findall(
+            subsection(text, "## 画面对账")
+        )
+    ]
+    if not coverage_rows:
+        errors.append("画面对账没有有效对账行")
+    else:
+        expected_indexes = list(range(1, len(coverage_rows) + 1))
+        if [row[0] for row in coverage_rows] != expected_indexes:
+            errors.append("画面对账序号必须从 1 连续递增，且与原剧本抽取顺序一致")
+        units_per_shot: dict[str, int] = {}
+        for row_index, _, source, landing, disposition in coverage_rows:
+            kind_match = next(
+                (kind for kind in DISPOSITION_KINDS if disposition.startswith(kind)),
+                "",
+            )
+            if not kind_match:
+                errors.append(
+                    f"画面对账第 {row_index} 行处置非法：{disposition or '（空）'}；"
+                    f"只能是 {'／'.join(DISPOSITION_KINDS)}"
+                )
+                continue
+            if kind_match == "舍弃":
+                reason = disposition[len("舍弃"):].strip(" ：:")
+                if not reason:
+                    errors.append(f"画面对账第 {row_index} 行标为舍弃但没有写理由")
+                continue
+            if kind_match == "转后期叠字":
+                # 后期叠字不落在视频节点里，没有 Shot 落点是正常的。
+                continue
+            landings = LANDING_RE.findall(landing)
+            if not landings:
+                errors.append(
+                    f"画面对账第 {row_index} 行处置为{kind_match}，"
+                    "落点必须写成 V01-Shot2 这样的具体位置"
+                )
+                continue
+            for segment_number, shot_text in landings:
+                if segment_number not in shots_by_segment:
+                    errors.append(
+                        f"画面对账第 {row_index} 行落点 V{segment_number} 不存在"
+                    )
+                elif int(shot_text) > shots_by_segment[segment_number]:
+                    errors.append(
+                        f"画面对账第 {row_index} 行落点 V{segment_number}-Shot{shot_text} "
+                        f"超出该段实际 Shot 数 {shots_by_segment[segment_number]}"
+                    )
+                else:
+                    key = f"V{segment_number}-Shot{shot_text}"
+                    units_per_shot[key] = units_per_shot.get(key, 0) + 1
+        crowded: list[str] = []
+        crowded_takes: list[str] = []
+        for key, count in sorted(units_per_shot.items()):
+            segment_number = key[1:3]
+            if continuous_take_segments.get(segment_number):
+                if count > MAX_UNITS_PER_CONTINUOUS_TAKE:
+                    crowded_takes.append(f"{key}({count}条)")
+            elif count > MAX_UNITS_PER_SHOT:
+                crowded.append(f"{key}({count}条)")
+        if crowded:
+            errors.append(
+                f"以下 Shot 各自承载了超过 {MAX_UNITS_PER_SHOT} 条原剧本画面指令：{crowded}；"
+                "该切的镜被合并了，画面指令密集时必须拆节点，不允许合并画面"
+            )
+        if crowded_takes:
+            warnings.append(
+                f"以下连续单镜承载了超过 {MAX_UNITS_PER_CONTINUOUS_TAKE} 条画面指令："
+                f"{crowded_takes}；连续单镜可以一镜演完多个动作，但请确认不是把该切的镜省掉了"
+            )
+        if script is None:
+            warnings.append(
+                "画面对账未对源校验：本次没有传 --script <原剧本>，"
+                "只检查了表格自身格式，无法证明原剧本的画面指令没有被整行漏掉"
+            )
+        else:
+            errors.extend(check_coverage_against_script(coverage_rows, script, episode))
+
     count_match = SEGMENT_COUNT_RE.search(text)
     if not count_match:
         errors.append("缺少生成段总数")
@@ -644,9 +840,15 @@ def validate(path: Path) -> tuple[list[str], list[str], dict[str, int]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("markdown", type=Path)
+    parser.add_argument(
+        "--script",
+        type=Path,
+        help="原剧本（.docx/.txt/.md）；传入后逐条核对画面对账是否漏行、是否被改写",
+    )
+    parser.add_argument("--episode", type=int, help="原剧本中的集号")
     args = parser.parse_args()
     try:
-        errors, warnings, summary = validate(args.markdown)
+        errors, warnings, summary = validate(args.markdown, args.script, args.episode)
     except (OSError, UnicodeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

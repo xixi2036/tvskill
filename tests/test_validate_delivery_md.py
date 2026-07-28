@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import importlib.util
 import tempfile
 import unittest
@@ -28,6 +30,15 @@ VALID = """# EP01｜LibTV 完成提示词
 | 素材 | 类型 | 用途 |
 |---|---|---|
 | 单知影独立人物图 | 图片 | 身份 |
+
+## 资产清单
+
+| 类型 | 名称 | 形态 | 备注 |
+|---|---|---|---|
+| 人物 | 单知影 | 独立身份图 | 无台词 |
+| 人物 | 李威 | 独立身份图 | 有台词 |
+| 场景 | Z班-S1 | 双人场景状态图 | 与可见人数一致 |
+| 道具 | 道具-桌沿 | 由场景图承担 | 陈设级，本段无叙事道具 |
 
 ## 全剧连续性声明
 
@@ -112,6 +123,14 @@ VALID = """# EP01｜LibTV 完成提示词
 | 动作 | 李威开口 | 单一连续镜头同步对白 | 通过 |
 | 空间 | 二人在Z班 | 场景状态与首帧一致 | 通过 |
 
+## 画面对账
+
+| 序号 | 类型 | 原剧本画面指令 | 落点 | 处置 |
+|---|---|---|---|---|
+| 1 | visual | △ 李威在教室安静下来后开口。 | V01-Shot1 | 已落实 |
+| 2 | visual | △ 单知影没有回头，右手留在桌沿。 | V01-Shot1 | 已落实 |
+| 3 | subtitle | 【字幕：李威 Z班班长】 | — | 转后期叠字 |
+
 ## 段间衔接总表
 
 | 前段 | 后段 | 切点 | 连续状态 |
@@ -125,11 +144,20 @@ VALID = """# EP01｜LibTV 完成提示词
 
 
 class DeliveryMarkdownTests(unittest.TestCase):
-    def validate_text(self, text: str):
+    UNSOURCED_WARNING = "画面对账未对源校验"
+
+    def validate_text(self, text: str, script: str | None = None):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "delivery.md"
             path.write_text(text, encoding="utf-8")
-            return MODULE.validate(path)
+            script_path = None
+            if script is not None:
+                script_path = Path(directory) / "script.txt"
+                script_path.write_text(script, encoding="utf-8")
+            return MODULE.validate(path, script_path)
+
+    def real_warnings(self, warnings: list[str]) -> list[str]:
+        return [w for w in warnings if self.UNSOURCED_WARNING not in w]
 
     def errors(self, text: str) -> list[str]:
         return self.validate_text(text)[0]
@@ -137,7 +165,8 @@ class DeliveryMarkdownTests(unittest.TestCase):
     def test_valid_formal_dialogue_delivery(self):
         errors, warnings, summary = self.validate_text(VALID)
         self.assertEqual(errors, [])
-        self.assertEqual(warnings, [])
+        self.assertEqual(self.real_warnings(warnings), [])
+        self.assertTrue(any(self.UNSOURCED_WARNING in w for w in warnings))
         self.assertEqual(summary["videoSegments"], 1)
         self.assertEqual(summary["totalDurationSeconds"], 10)
 
@@ -190,6 +219,7 @@ class DeliveryMarkdownTests(unittest.TestCase):
             "Shot 2: 中近景",
         ).replace("- 交付等级：正式", "- 交付等级：预览")
         errors, warnings, _ = self.validate_text(candidate)
+        warnings = self.real_warnings(warnings)
         self.assertFalse(any("超过保守预算" in e for e in errors))
         self.assertFalse(any("平均不足 2 秒" in w for w in warnings))
 
@@ -324,6 +354,76 @@ class DeliveryMarkdownTests(unittest.TestCase):
             "真人实拍，高清，细节丰富，电影质感，色彩自然，光影柔和，保持人物身份一致。",
         )
         self.assertTrue(any("空泛画质词过多" in e for e in self.errors(invalid)))
+
+    SCRIPT = """第1集
+
+1-1 日 内 Z班教室
+人物：李威、单知影
+△ 李威在教室安静下来后开口。
+李威：哼，装什么装！
+△ 单知影没有回头，右手留在桌沿。
+【字幕：李威 Z班班长】
+"""
+
+    def test_coverage_matches_source_script(self):
+        errors, warnings, _ = self.validate_text(VALID, self.SCRIPT)
+        self.assertEqual(errors, [])
+        self.assertFalse(any(self.UNSOURCED_WARNING in w for w in warnings))
+
+    def test_dropped_coverage_row_is_caught_against_source(self):
+        # 删掉一行对账 = 一条画面指令被静默丢弃，正是 EP1 的失败形状
+        invalid = VALID.replace(
+            "| 2 | visual | \u25b3 \u5355\u77e5\u5f71\u6ca1\u6709\u56de\u5934\uff0c\u53f3\u624b\u7559\u5728\u684c\u6cbf\u3002 | V01-Shot1 | \u5df2\u843d\u5b9e |\n", ""
+        ).replace(
+            "| 3 | subtitle |", "| 2 | subtitle |",
+        )
+        errors = self.validate_text(invalid, self.SCRIPT)[0]
+        self.assertTrue(any("\u4e0e\u539f\u5267\u672c\u5b9e\u9645\u753b\u9762\u5355\u5143\u6570" in e for e in errors))
+
+    def test_rewritten_coverage_row_is_caught_against_source(self):
+        # 行数对得上但原文被改写（细节被抹掉），同样要抓出来
+        invalid = VALID.replace(
+            "\u25b3 \u5355\u77e5\u5f71\u6ca1\u6709\u56de\u5934\uff0c\u53f3\u624b\u7559\u5728\u684c\u6cbf\u3002 | V01-Shot1",
+            "\u25b3 \u5355\u77e5\u5f71\u6709\u53cd\u5e94\u3002 | V01-Shot1",
+        )
+        errors = self.validate_text(invalid, self.SCRIPT)[0]
+        self.assertTrue(any("\u539f\u6587\u4e0e\u5267\u672c\u4e0d\u7b26" in e for e in errors))
+
+    def test_units_crammed_into_one_shot_are_rejected(self):
+        multishot = VALID.replace(
+            "\u5355\u4e00\u8fde\u7eed\u955c\u5934\uff0c\u65e0\u526a\u5207\u3002\u4e2d\u8fd1\u666f",
+            "Shot 1: \u8fd1\u666f\uff0c\u56fa\u5b9a\u673a\u4f4d\u3002<\u4e3b\u4f531> \u81ea\u7136\u7728\u773c\u3002\n\nShot 2: \u4e2d\u8fd1\u666f",
+        ).replace(
+            "| 3 | subtitle | \u3010\u5b57\u5e55\uff1a\u674e\u5a01 Z\u73ed\u73ed\u957f\u3011 | \u2014 | \u8f6c\u540e\u671f\u53e0\u5b57 |",
+            "| 3 | visual | \u25b3 \u4e19\u3002 | V01-Shot1 | \u5df2\u843d\u5b9e |",
+        )
+        errors = self.errors(multishot)
+        self.assertTrue(any("\u5fc5\u987b\u62c6\u8282\u70b9" in e for e in errors))
+
+    def test_registered_color_card_must_be_bound(self):
+        invalid = VALID.replace(
+            "| \u573a\u666f | Z\u73ed-S1 | \u53cc\u4eba\u573a\u666f\u72b6\u6001\u56fe | \u4e0e\u53ef\u89c1\u4eba\u6570\u4e00\u81f4 |",
+            "| \u573a\u666f | Z\u73ed-S1 | \u53cc\u4eba\u573a\u666f\u72b6\u6001\u56fe | \u4e0e\u53ef\u89c1\u4eba\u6570\u4e00\u81f4 |\n"
+            "| \u8272\u5361 | \u8272\u5361-Z\u73ed | \u8272\u5361\u56fe | \u672c\u573a\u8272\u677f |",
+        )
+        errors = self.errors(invalid)
+        self.assertTrue(any("\u672a\u7ed1\u5b9a\u4efb\u4f55\u8272\u5361\u8d44\u4ea7" in e for e in errors))
+
+    def test_exact_text_prop_requires_locked_prop_image(self):
+        invalid = VALID.replace(
+            "| \u9053\u5177 | \u9053\u5177-\u684c\u6cbf | \u7531\u573a\u666f\u56fe\u627f\u62c5 | \u9648\u8bbe\u7ea7\uff0c\u672c\u6bb5\u65e0\u53d9\u4e8b\u9053\u5177 |",
+            "| \u9053\u5177 | \u62a5\u7eb8 | \u5b9a\u7248\u9053\u5177\u56fe | \u542b\u7cbe\u786e\u6587\u5b57\uff1a\u5934\u7248\u6807\u9898 |",
+        )
+        errors = self.errors(invalid)
+        self.assertTrue(any("\u5b9a\u7248\u9053\u5177\u56fe" in e for e in errors))
+
+    def test_missing_coverage_section_is_rejected(self):
+        invalid = VALID.replace("## \u753b\u9762\u5bf9\u8d26", "## \u5176\u5b83\u8bb0\u5f55")
+        self.assertTrue(any("\u7f3a\u5c11\u7ae0\u8282\uff1a## \u753b\u9762\u5bf9\u8d26" in e for e in self.errors(invalid)))
+
+    def test_missing_asset_section_is_rejected(self):
+        invalid = VALID.replace("## \u8d44\u4ea7\u6e05\u5355", "## \u5176\u5b83\u6e05\u5355")
+        self.assertTrue(any("\u7f3a\u5c11\u7ae0\u8282\uff1a## \u8d44\u4ea7\u6e05\u5355" in e for e in self.errors(invalid)))
 
     def test_arbitrary_bracket_text_is_still_rejected(self):
         invalid = VALID.replace("【关键约束】机位铁律", "【标题：Z班开学】【关键约束】机位铁律")
