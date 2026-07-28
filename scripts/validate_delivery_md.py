@@ -105,9 +105,11 @@ ALLOWED_BRACKETS_RE = re.compile(r"^【(?:阶段\d+[^】]*|声音设计|关键�
 SOUND_DESIGN_BLOCK_RE = re.compile(r"【声音设计】.*?(?=\n\s*\n|\n\s*【|\Z)", re.S)
 STYLE_LOCK_RE = re.compile(r"^[^\n]*(?:美学|质感|色调|film|grain|aesthetics)[^\n]*$", re.I)
 ASSET_ANCHOR_RE = re.compile(r"严格按此图渲染|视觉锚定.{0,24}不可改造")
-INLINE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
+# 同样不能用 \b：#7A4FBD暗紫 这种紧贴中文的写法才是真实语料里的常态。
+INLINE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}(?![0-9A-Fa-f])")
 NAMED_IRON_RULE_RE = re.compile(r"[^\s，。；：]{2,12}铁律")
-NOT_CHAIN_RE = re.compile(r"NOT\s+\S+.{0,80}?NOT\s+\S+", re.S | re.I)
+# NOT 后面未必有空格：中文语料里普遍写成 NOT卡通渲染+NOT三维动画。
+NOT_CHAIN_RE = re.compile(r"NOT\s*\S+.{0,80}?NOT\s*\S+", re.S | re.I)
 VOICE_SLOT_RE = re.compile(r"待上传|占位")
 VOICE_PENDING_STATUS_RE = re.compile(r"待关联")
 EYE_TARGET_RE = re.compile(
@@ -155,7 +157,8 @@ LOWER_BODY_LOCK_RE = re.compile(
     r"(?:黑板|前方|不变)|(?:只让|仅让|只移动|仅移动|只转动|仅转动)"
     r".{0,4}(?:眼睛|视线|头部|侧头))"
 )
-OS_VO_RE = re.compile(r"\b(?:OS|VO)\b|内心|画外音|旁白", re.I)
+# 注意不能用 \b：中文与字母相邻时不构成词边界，"系统VO" 里的 VO 会漏判。
+OS_VO_RE = re.compile(r"(?<![A-Za-z])(?:OS|VO)(?![A-Za-z])|内心|画外音|旁白", re.I)
 COMPETING_DIALOGUE_ACTION_RE = re.compile(
     r"走入|走向|行走|转身|递给|递出|推向|飞出|飞向|撞上|扎入|掠过|"
     r"全班.{0,12}(?:转头|安静|反应)|众人.{0,12}(?:转头|安静|反应)|"
@@ -179,7 +182,11 @@ CROWD_HIERARCHY_RE = re.compile(
     r"(?:反应|动作).{0,12}错开"
 )
 PHYSICAL_LIGHT_RE = re.compile(
-    r"窗光|日光|阳光|月光|顶灯|台灯|壁灯|走廊灯|路灯|霓虹|烛光|荧光灯|屏幕光"
+    # 自然光与灯具
+    r"窗光|日光|阳光|月光|自然光|顶灯|台灯|壁灯|走廊灯|路灯|霓虹|烛光|荧光灯|屏幕光"
+    # 自发光体：虚空、意识空间等非写实场景没有窗和灯，但光束/电弧/辉光同样是
+    # 可识别的具体光源，与"光影柔和"这类空泛画质词有本质区别
+    r"|光束|电弧|辉光|自发光|火光|爆炸光|冷光源|环境光带|粒子光"
 )
 SLOP_TERMS = (
     "高清",
@@ -225,13 +232,24 @@ def binding_category(name: str) -> str:
     return "character"
 
 
+def trailing_speaker_note(prompt: str, end: int) -> str:
+    """取台词右侧紧跟的括注，例如 {台词}(系统VO,使用Mixed 3音色)。"""
+    tail = prompt[end:end + 40]
+    match = re.match(r"\s*[（(]([^）)]*)[）)]", tail)
+    return match.group(1) if match else ""
+
+
 def has_synchronous_dialogue(prompt: str) -> bool:
     for match in DIALOGUE_RE.finditer(prompt):
+        # 台词左右任一侧标了 OS/VO/旁白/内心，就是非同步声音，
+        # 不该套用同步对白的开口触发、眼神目标与首帧眼神锚规则。
+        if OS_VO_RE.search(trailing_speaker_note(prompt, match.end())):
+            continue
         context = prompt[max(0, match.start() - 80):match.start()]
         immediate = context[-32:]
         if re.search(r"(?:他说|她说|开口说|说出|对白)\s*$", immediate):
             return True
-        if not re.search(r"内心|OS|画外音|旁白|VO", immediate, re.I):
+        if not OS_VO_RE.search(immediate):
             return True
     return False
 
@@ -245,9 +263,18 @@ def synchronous_dialogue_blocks(prompt: str) -> list[str]:
     return [block for block in blocks if has_synchronous_dialogue(block)]
 
 
+VOICE_SOURCE_RE = re.compile(r"<主体\d+>|[^\s，。；：,、（()）]{0,8}(?:VO|OS|旁白)")
+
+
 def text_voice_subjects(prompt: str) -> set[str]:
+    """台词的说话人：优先取右侧括注里显式写的声源，否则取左侧最近的 <主体N>。"""
     subjects: set[str] = set()
     for match in DIALOGUE_RE.finditer(prompt):
+        note = trailing_speaker_note(prompt, match.end())
+        noted = VOICE_SOURCE_RE.search(note) if note else None
+        if noted:
+            subjects.add(noted.group(0).strip())
+            continue
         context = prompt[max(0, match.start() - 140):match.start()]
         found = re.findall(r"<主体\d+>", context)
         if found:
@@ -256,10 +283,15 @@ def text_voice_subjects(prompt: str) -> set[str]:
 
 
 def audio_control_subjects(prompt: str) -> set[str]:
-    return set(re.findall(
-        r"\{\{Mixed \d+\}\}.{0,40}?只控制\s*(<主体\d+>).{0,24}?音色",
-        prompt,
-    ))
+    return {
+        found.strip()
+        for found in re.findall(
+            r"\{\{Mixed \d+\}\}.{0,40}?只控制\s*"
+            r"(<主体\d+>|[^\s，。；：,、]{0,10}(?:VO|OS|旁白))"
+            r".{0,24}?音色",
+            prompt,
+        )
+    }
 
 
 def normalized_source(text: str) -> str:
@@ -577,7 +609,10 @@ def validate(
         slop_count = sum(term in prompt for term in SLOP_TERMS)
         if slop_count >= 4:
             errors.append(f"{label} 空泛画质词过多，应改为机位、物理光源、动作或声音")
-        if not all(term in prompt for term in ("无字幕", "水印", "Logo")):
+        no_subtitle = any(
+            term in prompt for term in ("无字幕", "NOT字幕", "NOT 字幕", "不出现字幕")
+        )
+        if not (no_subtitle and "水印" in prompt and "Logo" in prompt):
             errors.append(f"{label} 缺少字幕/水印/Logo 兜底")
         if EXACT_TEXT_GENERATION_RE.search(prompt):
             errors.append(f"{label} 把精确文字交给视频模型生成；应使用定版道具图或后期叠字")
@@ -629,13 +664,13 @@ def validate(
                 )
             if sound != "开启":
                 errors.append(f"{label} 有台词/OS/VO/旁白时必须开启声音并原生声画同出")
-            if audio_rows and not re.search(
-                r"\{\{Mixed \d+\}\}.{0,40}?只控制\s*<主体\d+>.{0,24}?音色",
-                prompt,
-            ):
-                errors.append(f"{label} 音频 Mixed 未声明只控制指定主体音色")
             spoken = text_voice_subjects(prompt)
             controlled = audio_control_subjects(prompt)
+            if audio_rows and not controlled:
+                errors.append(
+                    f"{label} 音频 Mixed 未声明只控制指定说话人的音色"
+                    "（写成「只控制 <主体N> 的音色」或「只控制系统VO的音色」）"
+                )
             missing = sorted(spoken - controlled)
             if missing:
                 errors.append(

@@ -425,6 +425,73 @@ class DeliveryMarkdownTests(unittest.TestCase):
         invalid = VALID.replace("## \u8d44\u4ea7\u6e05\u5355", "## \u5176\u5b83\u6e05\u5355")
         self.assertTrue(any("\u7f3a\u5c11\u7ae0\u8282\uff1a## \u8d44\u4ea7\u6e05\u5355" in e for e in self.errors(invalid)))
 
+    def vo_only_text(self) -> str:
+        """把段改成纯画外音：VO 不是同步对白，不该被套用开口触发/眼神/首帧规则。"""
+        return VALID.replace(
+            "<主体2> 严格使用 Mixed 3 的音色，自然说出 {哼，装什么装！}，"
+            "一口自然说完；说完恢复鼻息，继续听着 <主体1> 的方向，右手自然留在桌沿。",
+            "画面保持空镜，无人物开口。{哼，装什么装！}(系统VO，使用 Mixed 3 音色)",
+        ).replace(
+            "@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色与口型，"
+            "不继承其它台词、情绪和背景声。",
+            "@[李威-逐句音频] {{Mixed 3}} 只控制系统VO的音色，不继承其它台词、情绪和背景声。",
+        )
+
+    def test_voice_over_is_not_treated_as_sync_dialogue(self):
+        errors = self.errors(self.vo_only_text())
+        for phrase in ("开口触发", "眼神对象", "可剪辑落点", "干净首帧"):
+            self.assertFalse(
+                any(phrase in e for e in errors), f"VO 不应触发同步对白规则：{phrase}"
+            )
+
+    def test_voice_over_source_can_be_bound_without_subject(self):
+        errors = self.errors(self.vo_only_text())
+        self.assertFalse(any("说话主体缺少对应独立音色绑定" in e for e in errors))
+        self.assertFalse(any("未声明只控制指定主体音色" in e for e in errors))
+
+    def test_self_luminous_light_counts_as_physical_light(self):
+        candidate = VALID.replace(
+            "右侧 #C9D8E4 冷白窗光落在 <主体1> 的右肩，室内顶灯投出 #8A7A5E 暖色补光",
+            "一道 #C9D8E4 冷白光束落在 <主体1> 的右肩，#8A7A5E 电弧在侧后方明灭",
+        ).replace("右侧冷白窗光与室内顶灯方向全程固定。", "光束与电弧方向全程固定。")
+        self.assertFalse(
+            any("物理光源" in e for e in self.errors(candidate))
+        )
+
+    def test_vague_light_still_rejected(self):
+        candidate = VALID.replace(
+            "右侧 #C9D8E4 冷白窗光落在 <主体1> 的右肩，室内顶灯投出 #8A7A5E 暖色补光",
+            "画面整体明亮",
+        ).replace("右侧窗光与室内顶灯方向全程固定。", "光线保持一致。")
+        self.assertTrue(any("物理光源" in e for e in self.errors(candidate)))
+
+    def test_not_subtitle_phrasing_is_accepted(self):
+        candidate = VALID.replace(
+            "保持无字幕，不生成可辨识文字、水印或 Logo。",
+            "不生成可辨识文字。NOT字幕+NOT水印+NOT Logo。",
+        )
+        self.assertFalse(
+            any("字幕/水印/Logo" in e for e in self.errors(candidate))
+        )
+
+    def test_missing_watermark_guard_still_rejected(self):
+        candidate = VALID.replace(
+            "保持无字幕，不生成可辨识文字、水印或 Logo。", "保持画面干净。"
+        )
+        self.assertTrue(any("字幕/水印/Logo" in e for e in self.errors(candidate)))
+
+    def test_chinese_adjacent_hex_and_not_chain_count(self):
+        """真实语料里 HEX 与 NOT 紧贴中文，词边界/空格假设会造成系统性误报。"""
+        candidate = VALID.replace(
+            "右侧 #C9D8E4 冷白窗光", "右侧#C9D8E4冷白窗光"
+        ).replace(
+            "NOT slow motion+NOT speed ramping+NOT 卡通渲染+NOT 三维动画+NOT 换脸+NOT 多余人物入画。",
+            "NOT慢动作+NOT速度渐变+NOT卡通渲染+NOT三维动画+NOT换脸。",
+        )
+        _, warnings, _ = self.validate_text(candidate)
+        self.assertFalse(any("inline HEX" in w for w in warnings))
+        self.assertFalse(any("NOT 链" in w for w in warnings))
+
     def test_arbitrary_bracket_text_is_still_rejected(self):
         invalid = VALID.replace("【关键约束】机位铁律", "【标题：Z班开学】【关键约束】机位铁律")
         self.assertTrue(any("禁用的【】画面文字语法" in e for e in self.errors(invalid)))
