@@ -82,10 +82,48 @@ class AuditImageAssetNodeTests(unittest.TestCase):
         }
         errors, _ = MOD.audit(target, [], {}, [], True)
         self.assertTrue(any("16:9" in item for item in errors))
-        self.assertTrue(any("13 个" in item for item in errors))
+        self.assertTrue(any("13/22/24" in item for item in errors))
         self.assertTrue(any("9:16" in item for item in errors))
         self.assertTrue(any("HEX" in item for item in errors))
         self.assertTrue(any("无文字/无标签" in item for item in errors))
+
+    def test_accepts_22_color_wanwu_wenxin_extension(self):
+        """问心复杂场景色卡:22色档,版式约束不变,只放开数量(2026-08-01补)。"""
+        colors = "、".join(f"颜色{i} #{i:06X}（用途{i}）" for i in range(1, 23))
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "name": "EP01-A09-色卡-废墟战场",
+                "prompt": (
+                    "16:9横版万物生标准色卡参考图，纯白背景。"
+                    "22个等大矩形色块在同一行从左到右单排排列，每个色块下方以小号黑色等宽字体标注HEX。"
+                    f"从左到右：{colors}。"
+                    "所有色块均为纯平色、锐利硬边，无渐变、无纹理、无噪点、无阴影。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertEqual(errors, [])
+
+    def test_rejects_declared_count_mismatching_actual_hex_count(self):
+        """文字声明22色但实际只列13个HEX——数量对不上必须拦。"""
+        colors = "、".join(f"颜色{i} #{i:06X}（用途{i}）" for i in range(1, 14))
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "name": "EP01-A09-色卡-废墟战场",
+                "prompt": (
+                    "16:9横版万物生标准色卡参考图，纯白背景。"
+                    "22个等大矩形色块在同一行从左到右单排排列，每个色块下方以小号黑色等宽字体标注HEX。"
+                    f"从左到右：{colors}。"
+                    "所有色块均为纯平色、锐利硬边，无渐变、无纹理、无噪点、无阴影。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertTrue(any("声明色块数(22)与实际列出的 HEX 数(13)不一致" in item for item in errors))
 
     def test_accepts_standard_3d_character_reference_board(self):
         target = {

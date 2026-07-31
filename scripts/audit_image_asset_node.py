@@ -24,16 +24,32 @@ CHARACTER_STILL_NAME_RE = re.compile(r"(?:人物剧照|角色剧照|剧照|表�
 HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
 
 
+# 万物生·问心（正传姊妹篇）在正传固定 13 色之外，对复杂场景（多角色同框/多光位/
+# 巨物战场）实证出 22、24 色两档扩展版式——版式约束不变（16:9横版白底/纯色硬边/HEX标签/
+# 单行排列），只放开色块数量。2026-08-01 补：正传单档 13 色时不区分，允许三档之一即可。
+VALID_CARD_COUNTS = (13, 22, 24)
+_CARD_COUNT_CN = {"十三": 13, "二十二": 22, "二十四": 24}
+
+
 def audit_color_card_prompt(prompt: str) -> list[str]:
-    """Enforce the fixed Wanwusheng 13-color reference-card layout."""
+    """Enforce the fixed Wanwusheng color-card layout: 13-color baseline (正传)，
+    22/24-color variants permitted for complex scenes (问心 wanwu-field-craft extension)。"""
     errors: list[str] = []
+    count_match = re.search(
+        r"(13|22|24|十三|二十二|二十四)\s*(?:个|色|枚)?[^。\n]{0,24}(?:色块|色卡|swatches?)",
+        prompt, re.I,
+    )
+    declared = None
+    if count_match:
+        token = count_match.group(1)
+        declared = int(token) if token.isdigit() else _CARD_COUNT_CN.get(token)
     checks = [
         (re.search(r"16\s*:\s*9", prompt), "色卡必须是 16:9 横版参考资产"),
         (re.search(r"(?:横版|横向|horizontal)", prompt, re.I), "色卡必须明确横版布局"),
         (re.search(r"(?:纯白背景|白色背景|白底|white background)", prompt, re.I), "色卡必须使用纯白背景"),
-        (re.search(r"(?:13|十三)\s*(?:个|色|枚)?[^。\n]{0,24}(?:色块|色卡|swatches?)", prompt, re.I), "色卡必须明确 13 个色块"),
-        (re.search(r"(?:单行|单排|同一行|一字排开|single row)", prompt, re.I), "13 个色块必须单行排列"),
-        (re.search(r"(?:等大|等宽|等面积|均等|evenly[- ]sized|equal[- ]sized)", prompt, re.I), "13 个色块必须等大"),
+        (declared in VALID_CARD_COUNTS, "色卡必须明确色块数量为 13/22/24 之一（正传固定13，问心复杂场景可用22/24）"),
+        (re.search(r"(?:单行|单排|同一行|一字排开|single row)", prompt, re.I), "色块必须单行排列"),
+        (re.search(r"(?:等大|等宽|等面积|均等|evenly[- ]sized|equal[- ]sized)", prompt, re.I), "色块必须等大"),
         (re.search(r"(?:下方|下面|below)", prompt, re.I), "每个色块下方必须放置 HEX 标签"),
         (re.search(r"(?:等宽|monospace)", prompt, re.I), "HEX 标签必须使用等宽字体"),
         (re.search(r"(?:黑色|black)", prompt, re.I), "HEX 标签必须使用黑色字体"),
@@ -46,8 +62,10 @@ def audit_color_card_prompt(prompt: str) -> list[str]:
     ]
     errors.extend(message for matched, message in checks if not matched)
     unique_hex = {value.upper() for value in HEX_RE.findall(prompt)}
-    if len(unique_hex) != 13:
-        errors.append(f"色卡必须列出恰好 13 个不同 HEX：actual={len(unique_hex)}")
+    if len(unique_hex) not in VALID_CARD_COUNTS:
+        errors.append(f"色卡 HEX 数量必须恰好是 13/22/24 之一：actual={len(unique_hex)}")
+    elif declared is not None and len(unique_hex) != declared:
+        errors.append(f"色卡文字声明色块数({declared})与实际列出的 HEX 数({len(unique_hex)})不一致")
     if re.search(r"(?:无文字|无标签|不生成[^。\n]{0,12}(?:文字|标签)|只有纯色块)", prompt):
         errors.append("色卡提示词与固定版式冲突：HEX 标签是必需设计信息，不得声明无文字/无标签")
     if re.search(
