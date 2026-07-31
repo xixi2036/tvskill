@@ -1,0 +1,4 @@
+interface:
+  display_name: "TVSkill"
+  short_description: "生成并审计声画、人物与空间拓扑一致的 LibTV 提示词"
+  default_prompt: "使用 $tvskill 把真人短剧编译成可复制的 LibTV Markdown，锁定人物、音色、场景功能拓扑与 LOOK-ID，通过实时 Mixed 门禁，并在生成后回收全部视频做十轴质量审计。"
