@@ -98,6 +98,23 @@
 - 正式对白必须再绑定干净首帧或已验收续接帧，画面中真实存在视线对象；只写
   “看向对方”而没有空间锚不能通过。
 
+★**同镜身份图 + 姿态参考图分离绑定**：需要"我的角色摆某张参考图的姿势/动态"这类需求
+时（如借用一张有动感的姿态图，但角色身份仍是自己的定妆图），两张图各自独立 Mixed，
+并各自用显式排除句划清职责边界，禁止只写"参考这张图的姿势"就完事——不划边界模型会连
+参考图里的人物身份一起抄过来。万物生·问心画布的实证写法（英文，与其官方主体定义法同源）：
+
+```
+@[身份图token] — Reference 1: Preserve her identity, face, hair, and clothing exactly
+from this image.
+@[姿态图token] — Reference 2: the body pose. Use ONLY the body posture and the energy
+from this image. Do NOT use this image's character identity, face, clothing, eye color,
+or background setting.
+```
+
+中文项目沿用同一结构，不必逐字照抄英文：身份图一句"锁定身份/五官/发型/服装，来自此图"，
+姿态图一句"只取此图的身体姿态/动态，不取此图的人物身份/面部/服装/背景"——两句都要写，
+只写其中一句会退化成普通的单图 Mixed，起不到分离效果。
+
 ## 7. 提示词预算与反套话
 
 最终提示词优先保留：
