@@ -28,9 +28,16 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 STEPS = [
     {
+        "id": "intake",
+        "title": "任务前置决策摸底",
+        "requires": [],
+        "gate": "产出 <集号>-任务前置决策.json，必填项非空（媒介/范围/资产现状/画布操作/音色状态；"
+                "媒介=3D CG 时另需 3D子风格）",
+    },
+    {
         "id": "script_units",
         "title": "抽取原剧本画面单元",
-        "requires": [],
+        "requires": ["intake"],
         "gate": "抽取器跑通且单元数大于 0，产出 <集号>-画面单元.json",
     },
     {
@@ -100,6 +107,15 @@ def state_path(episode: str, directory: Path) -> Path:
 
 def delivery_path(episode: str, directory: Path) -> Path:
     return directory / f"{episode}-LibTV视频节点提示词.md"
+
+
+def intake_path(episode: str, directory: Path) -> Path:
+    return directory / f"{episode}-任务前置决策.json"
+
+
+# intake 步的必填决策字段：机器只验"填了没填"，不验"填得对不对"——语义正确性
+# 和 review/canvas/generate 一样只能由人/LLM 负责，机器只保证它没被跳过。
+INTAKE_REQUIRED_FIELDS = ("媒介", "范围", "资产现状", "画布操作", "音色状态")
 
 
 def load_state(episode: str, directory: Path) -> dict:
@@ -180,6 +196,31 @@ def check_step(
 ) -> tuple[bool, str]:
     delivery = delivery_path(episode, directory)
     units_file = directory / f"{episode}-画面单元.json"
+
+    if step_id == "intake":
+        # ★grilling 前置问答步(2026-08-01 加)：把媒介/范围/资产现状/画布操作/音色状态
+        # 这些原本散落在 1b/8/音色关联等各步才会被动问到的决策，前置到开工前一次问清楚。
+        # 机器只验"决策文件存在且必填项非空"，不代替 LLM 判断决策内容是否合理——
+        # 逐题怎么问、按 grilling 方法论一次只问一题、能从本地资料查到的先查不问，
+        # 写在 SKILL.md"开始前"一节，不写在这里（这里只是机器闸，不是问答脚本）。
+        path = intake_path(episode, directory)
+        if not path.exists():
+            return False, (
+                f"缺 {path.name}：先按 SKILL.md「开始前」一节逐题问清楚任务前置决策，"
+                "再把答案写成这个 JSON 文件"
+            )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, f"{path.name} 不是合法 JSON：{exc}"
+        if not isinstance(data, dict):
+            return False, f"{path.name} 顶层必须是 object"
+        missing = [f for f in INTAKE_REQUIRED_FIELDS if not str(data.get(f) or "").strip()]
+        if data.get("媒介") == "3D CG" and not str(data.get("3D子风格") or "").strip():
+            missing.append("3D子风格（媒介选了 3D CG 就必须填）")
+        if missing:
+            return False, f"{path.name} 缺必填项：{missing}"
+        return True, f"任务前置决策已齐全：{ {k: data.get(k) for k in INTAKE_REQUIRED_FIELDS} }"
 
     if step_id == "script_units":
         if not script:

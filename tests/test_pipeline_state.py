@@ -119,6 +119,77 @@ class PipelineStateTests(unittest.TestCase):
         state["steps"]["coverage"] = "done"
         self.assertEqual(MODULE.blocking_prerequisites("validate", state), [])
 
+    def test_script_units_now_requires_intake(self):
+        """★2026-08-01 加:grilling 前置问答步必须挡在 script_units 之前，
+        不能像之前那样一进门就抽画面单元——媒介/范围这些决策必须先问清楚。"""
+        state = {"episode": "EP01", "steps": {}, "deliveryHash": ""}
+        self.assertEqual(
+            MODULE.blocking_prerequisites("script_units", state), ["intake"]
+        )
+        state["steps"]["intake"] = "done"
+        self.assertEqual(MODULE.blocking_prerequisites("script_units", state), [])
+
+    def test_intake_gate_rejects_missing_file(self):
+        ok, detail = self.check("intake")
+        self.assertFalse(ok)
+        self.assertIn("任务前置决策.json", detail)
+
+    def test_intake_gate_rejects_missing_required_fields(self):
+        intake_file = self.dir / "EP01-任务前置决策.json"
+        intake_file.write_text(
+            json.dumps({"媒介": "真人实拍", "范围": "单集"}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        ok, detail = self.check("intake")
+        self.assertFalse(ok)
+        self.assertIn("资产现状", detail)
+        self.assertIn("画布操作", detail)
+        self.assertIn("音色状态", detail)
+
+    def test_intake_gate_requires_3d_substyle_when_medium_is_3d_cg(self):
+        intake_file = self.dir / "EP01-任务前置决策.json"
+        intake_file.write_text(
+            json.dumps(
+                {
+                    "媒介": "3D CG",
+                    "范围": "单集",
+                    "资产现状": "需要从零生产",
+                    "画布操作": "仅生成Markdown",
+                    "音色状态": "需要占位等待人工上传",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        ok, detail = self.check("intake")
+        self.assertFalse(ok)
+        self.assertIn("3D子风格", detail)
+
+    def test_intake_gate_accepts_complete_decisions(self):
+        intake_file = self.dir / "EP01-任务前置决策.json"
+        intake_file.write_text(
+            json.dumps(
+                {
+                    "媒介": "真人实拍",
+                    "范围": "单集",
+                    "资产现状": "已有可复用",
+                    "画布操作": "仅生成Markdown",
+                    "音色状态": "全部已上传",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        ok, detail = self.check("intake")
+        self.assertTrue(ok, detail)
+
+    def test_intake_gate_rejects_malformed_json(self):
+        intake_file = self.dir / "EP01-任务前置决策.json"
+        intake_file.write_text("{不是合法json", encoding="utf-8")
+        ok, detail = self.check("intake")
+        self.assertFalse(ok)
+        self.assertIn("不是合法 JSON", detail)
+
     def test_delivery_change_invalidates_downstream_steps(self):
         self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
         state = {
