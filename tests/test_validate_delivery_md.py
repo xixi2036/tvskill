@@ -459,6 +459,13 @@ class DeliveryMarkdownTests(unittest.TestCase):
             any("物理光源" in e for e in self.errors(candidate))
         )
 
+    def test_floor_lamp_counts_as_physical_light(self):
+        candidate = VALID.replace(
+            "右侧 #C9D8E4 冷白窗光落在 <主体1> 的右肩，室内顶灯投出 #8A7A5E 暖色补光",
+            "画面左侧 #C9D8E4 落地灯照亮 <主体1> 的右肩",
+        ).replace("右侧冷白窗光与室内顶灯方向全程固定。", "落地灯方向全程固定。")
+        self.assertFalse(any("物理光源" in e for e in self.errors(candidate)))
+
     def test_vague_light_still_rejected(self):
         candidate = VALID.replace(
             "右侧 #C9D8E4 冷白窗光落在 <主体1> 的右肩，室内顶灯投出 #8A7A5E 暖色补光",

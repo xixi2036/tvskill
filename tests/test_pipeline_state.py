@@ -23,6 +23,19 @@ SCRIPT = """第1集
 △ 竖瞳合拢，消失在黑暗中。
 """
 
+MARKDOWN_SCRIPT = """# 第1集
+
+## 1-1 婚房门口 夜 内
+
+**人物**：叶敏、顾续尘
+
+△叶敏拍打房门。
+
+【音效】砰！砰！
+
+叶敏OS（无话可说地认栽）：……他真的，壕无人性。
+"""
+
 ASSETS_FULL = """# EP01｜LibTV 完成提示词
 
 ## 资产清单
@@ -58,6 +71,17 @@ class PipelineStateTests(unittest.TestCase):
         self.assertTrue(ok, detail)
         units = json.loads((self.dir / "EP01-画面单元.json").read_text(encoding="utf-8"))
         self.assertEqual(len(units), 2)
+
+    def test_first_step_accepts_markdown_headings_and_bare_sfx(self):
+        markdown_script = self.dir / "script.md"
+        markdown_script.write_text(MARKDOWN_SCRIPT, encoding="utf-8")
+        ok, detail = self.check("script_units", markdown_script)
+        self.assertTrue(ok, detail)
+        units = json.loads(
+            (self.dir / "EP01-画面单元.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual([unit["kind"] for unit in units], ["visual", "sfx"])
+        self.assertEqual(units[0]["scene"], "1-1 婚房门口 夜 内")
 
     def test_script_units_refuses_without_script(self):
         ok, detail = self.check("script_units", None)

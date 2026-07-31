@@ -1,175 +1,207 @@
-# LibTV 画布接口合同
+# TVMao 画布接口合同
 
-> 默认只交付 Markdown。只有用户明确要求操作画布时，才执行本合同；创建/更新节点与运行生成必须分开授权。
+> 文件名暂保留 `libtv-canvas-contract.md`，只为兼容既有 SKILL 链接；运行时后端已经迁移为 TVMao CLI。默认只交付 Markdown。创建/更新节点与运行生成必须分开授权。
 
-## 1. 唯一同步来源
+## 1. 已验证环境
 
-画布同步只读取 TVSkill 最终交付的 `<集号>-LibTV视频节点提示词.md`，不生成、不读取旧
-`payload`、`asset-plan`、`movement-ledger` 或 `reference-manifest` JSON。
-
-每个 `## 生成段 VNN` 对应一个未运行的 LibTV `video` 节点：
-
-- `LibTV 完成提示词（整块复制）`代码块写入节点 `prompt`；
-- `Mixed 上传顺序`表决定素材连接和实时 `mixedListOrder`；
-- 集级模型、画幅、分辨率与段级时长、声音开关写入节点 settings；
-- 运行状态为“阻塞”的段禁止同步为可生成节点；
-- 位置图、轨迹图、构图图、平面图、箭头图与文字标注图禁止进入 Mixed。
-
-禁止创建 `script` 节点作为中间事实表，禁止调用 `libtv script storyboard`。
-
-## 2. 环境与实时 schema
-
-目标电脑必须安装并登录 LibTV CLI。实际操作前读取本机命令帮助和目标模型 schema；
-本文件不把特定 CLI 版本号或已缓存字段当作永久事实。
+2026-07-31 本机帮助、实时 schema 与 `huabu_studio` 源码提交
+`95fde2d509ad7f2da5a66221b134ca1fbf6565fc`：
 
 ```bash
-libtv --help
-libtv node --help
-libtv node list -p <PROJECT_UUID>
+tvmao version                         # 2.0.0
+tvmao --help
+tvmao node create --help
+tvmao node update --help
+tvmao edge --help
+tvmao model get doubao-seedance-2-0-fast-260128
 ```
 
-节点默认参数为 `Seedance 2.0 Fast VIP`、`9:16`、`480P`、声音开启。若实时 schema 中模型名、
-分辨率写法、时长范围或声音字段不同，以实时 schema 为准，同时保留 Markdown 中的语义
-合同。除非用户明确覆盖，不得擅自改模型或关闭声音。
+默认模型使用稳定 ID `doubao-seedance-2-0-fast-260128`，而不是旧展示名
+`Seedance 2.0 Fast VIP`。当前实时 schema 支持：
 
-## 3. 素材上传
+- `duration`：数字 `4..15`（另有 `-1`，TVSkill 不自动使用）；
+- `ratio`：含 `9:16`；
+- `resolution`：`480p` 或 `720p`；
+- `prompt`：必填字符串。
 
-人物图、角色音色、干净首帧/已验收续接帧、当前人数场景状态图和关键道具状态图必须先由
-Codex 或人工审核，再作为独立资源上传。每个可识别人物和每名说话人的音色各用独立资源。
+每次实际写画布前仍须重新读取 schema。模型 ID、可用状态或 enum 漂移时停止写入，不能沿用缓存。
+
+## 2. LibTV → TVMao 兼容性对照
+
+| 旧 LibTV 假设 | TVMao 2.0 事实 | 迁移动作 |
+|---|---|---|
+| `libtv node list -p <UUID>` 返回 `{nodes:[...]}` | `tvmao node list --project <int>` 直接返回数组 | 解析器改为数组，项目 ID 改为整数 |
+| `libtv node <id>` 兼做查询和修改 | `tvmao node get/update <id>` 明确分离 | 所有读写改用显式子命令 |
+| 节点可按展示名查找和更新 | `node create/update` 没有节点名参数 | 更新必须显式传 `--node VNN=<节点ID>`；缺映射时创建新节点 |
+| `-t video` | `--type video-generator` | 使用 TVMao 语义节点类型 |
+| 展示模型名 `Seedance 2.0 Fast VIP` | 稳定 `modelId=doubao-seedance-2-0-fast-260128` | 旧名只在本地兼容映射中存在，写入使用稳定 ID |
+| `params.settings={ratio,resolution,duration,enableSound}` | `params.prompt/ratio/resolution/duration` 扁平 | 删除嵌套 settings 与 `modeType` |
+| 有 `enableSound` 开关 | Seedance 2.0 schema 不暴露声音开关 | 以台词合同、audio-input 入边和成片音轨验收代替，不伪造参数 |
+| `mixedList` + `mixedListOrder` | 入边数组顺序就是模型输入顺序 | 用 `edge list --to` 回读；不存在额外 order 字段 |
+| `--left-add/--left-rm` | `node update --left/--left-rm` | 更新时同一命令先删旧边，再按目标顺序追加 |
+| `@[语义] {{Mixed N}}` 是旧内部 DSL | 网页 canonical 是 `@[图片:<nodeId>]`，运行时序列化为 `图片N` | 写入真实节点 ID token；普通 `@图片N` 不会形成 chip |
+| 资源节点可按名字唯一匹配 | TVMao 输入节点没有可靠展示名匹配合同 | `--apply` 必须显式传 `--asset 素材或语义=<节点ID>` |
+| 节点任务状态是数字 | `idle/generating/succeeded/failed` | 只允许更新 `idle`；其它状态新建版本节点 |
+| 无素材合规命令 | doubao-seedance 输入需 `compliance active` | `--pre-run` 把全部素材 active 设为硬门禁 |
+| 没有并发版本保护 | `node update --snapshot-version` | 参数更新前读 `canvas get.version` 并带回；多边重连须单独执行并精确回读 |
+
+## 3. 唯一同步来源
+
+画布同步只读取最终 `<集号>-LibTV视频节点提示词.md`。文件名与 `Mixed` 表格暂时保留，
+用于兼容现有 110 项确定性校验；它们现在是 TVSkill 的平台中立内部 DSL，不是 TVMao 节点的
+最终 prompt。
+
+每个 `## 生成段 VNN` 对应一个 `video-generator` 节点：
+
+- 完成提示词代码块先编译，再写入 `params.prompt`；
+- Mixed 表格按行决定入边总顺序；
+- 同媒体分别编号：图片、视频、音频各自从 1 开始；
+- `@[单知影] {{Mixed 1}}` 写入为 `@[图片:n-abc]（单知影）`；网页运行时序列化为 `图片1（单知影）`；
+- 模型、比例、分辨率和时长写入扁平 params；
+- 运行状态阻塞、音色占位或规划图进入输入表时禁止同步。
+
+编译必须满足：每个 Mixed 行恰好有对应官方引用，语义一致，编译后不残留
+`{{Mixed N}}`、`{{Image N}}` 或 `{{Portrait N}}`。
+
+### 3.1 图像资产节点不是视频 Mention 节点
+
+上述 canonical mention 合同只适用于 `video-generator`。当前 `image-generator` 前端把 prompt 原文与 ordered `connectedImages` 分开提交，没有 `PromptMentionEditor` 序列化阶段：
+
+- 真实关联是入边，不是 prompt chip；
+- prompt 采用 `参考图N（语义名）`，N 按 `edge list --to` 从 1 排列；
+- 普通 `图片N/图N` 缺少可审计语义，禁止使用；
+- `@[图片:nodeId]` 在图像节点里不会被正确序列化，禁止使用；
+- 运行依赖节点前用 `audit_image_asset_node.py --pre-run` 验证父图成功且有输出。
+
+## 4. 素材上传与确定性映射
 
 ```bash
-libtv upload <RESOURCE_NODE_NAME> \
-  --project <PROJECT_UUID> \
-  --resource /absolute/path/to/media
+tvmao asset upload /absolute/path/to/ref.png --project <PROJECT_ID> --create-node
+tvmao asset upload /absolute/path/to/voice.wav --project <PROJECT_ID> --create-node
 ```
 
-上传后以画布回读的节点 ID、名称和媒体类型为准。素材名应与 Markdown 的“素材”列唯一匹配；
-同名节点、缺失节点、错误媒体类型或未验收素材都必须先处理，不能让同步脚本猜测。
+TVMao 的输入类型为 `image-input`、`audio-input`、`video-input`。同步时素材名不能靠模糊搜索，
+必须显式提供映射：
 
-规划图只帮助确定空间和机位，不上传、不连接。未验收尾帧不能作为续接帧。
+```bash
+--asset '单知影身份图=n-abc123' \
+--asset '单知影音色参考-5s=n-def456'
+```
 
-## 4. 两阶段写入
+映射键可写素材列或绑定语义；同一行命中零个或多个节点都停止。输入节点类型必须与表格类型一致。
 
-第一阶段只创建或更新未运行视频节点：
+位置图、轨迹图、构图图、平面图、箭头图、文字标注图和未验收尾帧不得上传为正式输入边。
+
+## 5. 两阶段写入
+
+第一阶段只 dry-run：
 
 ```bash
 python3 scripts/sync_delivery_markdown.py <本集.md> \
-  --project <PROJECT_UUID> \
-  --node-prefix <节点名前缀> \
-  --node-suffix=-v3提示词
+  --project <PROJECT_ID> \
+  --asset '素材A=n-...' \
+  --asset '素材B=n-...'
 ```
 
-命令默认 dry-run。用户已明确要求写画布时才追加 `--apply`。可用 `--only 1,2,3`
-限制生成段。同步脚本不得传入或拼接 `--run`，不得覆盖已有生成结果的节点。
+输出计划、稳定 modelId、编译后 prompt、目标输入顺序和缺失素材。明确授权写画布后才追加
+`--apply`。已有 idle 节点的更新必须显式给段号映射：
 
-写入时按 Markdown 表格顺序连接素材，并重写 `prompt`、媒体列表和 Order 字段。LibTV 在
-删除或重建媒体边时可能清空 `{{Mixed N}}` 或保留旧缓存，因此命令返回成功不等于节点合格。
+```bash
+--node V01=n-video123
+```
 
-第二阶段必须重新读取画布事实：
+没有节点映射时创建新节点。TVMao 没有可靠的节点名查找合同，禁止按前缀猜测节点。
+
+同步脚本只调用 `node create` 或 `node update`，绝不调用 `node run`。写后必须重新执行：
+
+```bash
+tvmao node get <NODE_ID> --project <PROJECT_ID>
+tvmao edge list --to <NODE_ID> --project <PROJECT_ID>
+```
+
+入边回读顺序与 Mixed 表格不一致时写入失败。
+
+TVMao CLI 2.0.0 会把同一条 `node update` 中的多项 `--left-rm/--left` 展开为连续
+画布写入，而每次写入都会递增版本。因此不能把固定 `--snapshot-version` 与多边重连放在
+同一命令中，否则命令会与自身刚产生的新版本冲突。同步器先用快照版本保护参数更新；仅当
+现有入边与目标入边不同，才单独执行幂等重连，并立即用 `edge list --to` 校验完整顺序。
+
+## 6. 只读审计
+
+TVMao 不支持节点名前缀筛选合同，因此审计必须显式指定节点，或明确选择全项目：
 
 ```bash
 python3 scripts/audit_canvas_nodes.py \
-  --project <PROJECT_UUID> \
-  --name-prefix <节点名前缀>
-```
-
-也可重复使用 `--node <NODE_ID>` 精确限定。审计以实时 `prompt`、`mixedList`、
-`mixedListOrder`、`audioList`、模型、settings 和任务状态为唯一真值，不采信 Markdown
-表格中的自报顺序。
-
-## 5. Mixed 与声音硬门禁
-
-`Mixed N` 必须对应实时 `mixedListOrder` 第 N 位，且同时满足：
-
-- 编号从 1 连续，无越界、漏用或重复职责；
-- `@[语义资产]` 与实际节点名称、媒体类型和唯一用途一致；
-- 不同人物、不同音色、场景、首帧和道具不得共用一个 Mixed；
-- 含台词、OS、VO 或旁白时，声音开启，所有实际说话人均绑定自己的已审核音色；
-- 正式对白段缺任一说话人音色、干净首帧或已验收续接帧时必须阻塞；
-- 规划资产、空教室图与可见群像要求冲突、错误人数场景图均为硬错误。
-
-特别注意：提示词写 `@[角色] {{Mixed 1}}` 只表达作者意图，不证明 Mixed 1 的实际内容。
-只有回读语义、媒体类型和顺序全部一致才算绑定成功。
-
-## 6. 运行前凭证
-
-只有画布审计 `errors=0` 才能报告“画布提示词已就绪”。用户明确授权运行具体节点前，
-对目标节点执行：
-
-```bash
-python3 scripts/audit_canvas_nodes.py \
-  --project <PROJECT_UUID> \
+  --project <PROJECT_ID> \
   --node <NODE_ID> \
+  --asset '单知影身份图=n-abc123'
+
+# 只有确实要审计项目内全部 video-generator 时：
+python3 scripts/audit_canvas_nodes.py --project <PROJECT_ID> --all
+```
+
+审计以以下实时事实为准：
+
+- `node get` 的 `modelId`、扁平 `params` 与状态；
+- `edge list --to` 的有序上游节点；
+- `node list` 的上游类型；
+- `compliance status` 的素材合规状态；
+- 节点 prompt 中的 `@[图片:<nodeId>]/@[视频:<nodeId>]/@[音频:<nodeId>]`，以及按入边序列化后的 `图片N/视频N/音频N`。
+
+语义核对依赖 `--asset` 提供的人类可读标签；未提供时只能核对 ID、类型、编号和是否完整引用，
+不能声称“语义资产完全正确”。
+
+## 7. 合规与运行前凭证
+
+`doubao-seedance*` 的上游素材必须先通过合规校验：
+
+```bash
+tvmao compliance verify <INPUT_NODE_ID>... --project <PROJECT_ID>
+tvmao compliance status --project <PROJECT_ID>
+```
+
+校验是异步的。只有全部相关输入为 `active` 才能进入运行前门禁：
+
+```bash
+python3 scripts/audit_canvas_nodes.py \
+  --project <PROJECT_ID> \
+  --node <NODE_ID> \
+  --asset '素材A=n-...' \
   --pre-run \
   --receipt <NODE_ID>-pre-run-audit.md
 ```
 
-凭证绑定当前节点指纹。`prompt`、Mixed、媒体 Order、模型、settings 或任务状态任一变化后，
-凭证立即失效，必须重新审计。不得用旧凭证运行新输入。
+`--pre-run` 同时要求节点状态为 `idle`。凭证指纹覆盖 prompt、modelId、全部扁平 params、
+有序入边、合规状态和节点状态。任一项变化后凭证立即失效。
 
-同一连续组按顺序运行：前段生成、下载并验收通过后，后段才可连接该段的稳定续接帧。
-已有结果若未通过质量审计，结果和尾帧都视为拒绝态。
+## 8. 运行授权
 
-## 7. 失败边界
+运行是 TVMao 唯一消耗积分的动作，必须由用户对具体节点另行授权。`huabu_studio`
+当前网页会先把 canonical mention 序列化为 `图片N/视频N/音频N`，但 TVMao CLI 2.0.0
+的 `node run` 服务路径直接使用存储 prompt，没有执行同构序列化。因此 TVSkill 节点当前必须
+从网页运行，不能执行下列命令：
 
-- 未安装、未登录或未绑定项目：停止写入，保留本地 Markdown。
-- 素材名称匹配为零个或多个节点：停止并要求唯一化，不模糊猜测。
-- 素材缺失、媒体类型错误或职责冲突：保持阻塞，不降级为无参考生成。
-- 写入或回读失败：保留 stderr，不把网络或认证错误误判为节点不存在。
-- `Mixed N` 与实时媒体顺序不一致：修复、重写 prompt、再次回读。
-- 画布审计有硬错误：不得运行，不得把已有结果登记为验收续接帧。
-- CLI 或模型 schema 漂移：先按实际帮助与 schema 更新适配，再执行写入。
+```bash
+tvmao node run <NODE_ID> --project <PROJECT_ID> --wait
+```
 
-## 8. 已验证的踩坑清单
+也不能用 `--param-string prompt=...` 绕过：运行覆盖会写回 `settings.videoPrompt`，使节点丢失
+关联 chip。只有 CLI 服务端补齐与 `PromptMentionEditor.serializeMentionPrompt` 同构的转换并
+通过回归测试后，才能恢复 CLI 运行。不得把 `--wait`、`node run` 或任何隐式运行拼进同步脚本。同一连续组只运行当前可运行的第一段；
+前段成片验收通过后，后段才允许绑定其稳定续接帧。
 
-以下每条都由实机验证得出（建节点 → 画布回读 → 前端渲染核对），不是推测。
+图像资产另按依赖 DAG 分层授权：用户对第一层的运行确认不授权第二层。每层全部终态并完成视觉验收后必须暂停，通过弹窗或等价明确选项取得下一层的新确认；随后才对下一层执行 `audit_image_asset_node.py --pre-run`。禁止自动级联运行。
 
-### 8.1 绑定语法：只有 `{{Mixed N}}` 真生效
+## 9. 失败边界
 
-实测四种写法建同样的节点、连同一张图，看前端是否渲染成引用 chip：
+- 找不到或未登录 TVMao：停止写入，保留 Markdown。
+- 实时 model schema 不含目标参数或 enum 不接受当前值：停止，不私自降级模型。
+- 缺少 `--asset`、节点不存在或输入类型不符：停止，不猜测。
+- 更新目标不是 `idle`：停止并新建版本节点。
+- 现有节点 modelId 与目标不同：`node update` 无法安全改模型，停止并新建版本节点。
+- 入边回读顺序不一致：停止，不运行。
+- 对 Seedance 的输入合规状态不是 `active`：运行前门禁失败。
+- 审计有硬错误：不得运行，不得把已有结果登记为续接来源。
+- 网络、认证或 schema 漂移：保留 stderr，不能误判为节点不存在。
 
-| 写法 | 结果 |
-|---|---|
-| `@[语义名] {{Mixed N}}` | ✅ **唯一有效**。平台把 `{{Mixed N}}` 改写成 `{{Image N}}` 或 `{{Portrait N}}`（★2026-07-27 修正：不是统一改写成 `{{Image N}}`；同一 prompt 内不同素材会按素材形态分别改写为两者之一，具体判据未查清，只确认两种都是平台合法产物），渲染为带缩略图的 chip，chip 上带 `data-mention-node-id` = 该素材真实节点 ID |
-| `@[素材节点 UUID]` | ❌ 纯文本，不解析 |
-| `@[CDN 文件名 hash]` | ❌ 纯文本，不解析 |
-| `@[语义名]` 单独用 | ❌ 纯文本，不解析 |
-
-**要点**：
-- 真正起作用的是 **`{{Mixed N}}`**；`@[语义名]` 只是给人读与给审计脚本比对用，模型侧不依赖它。
-- **不得用 Asset ID / 文件名 hash 充当引用**——模型无法把 Asset ID 关联到参考内容，官方指南亦明确禁止。
-- LibTV 是 Seedance 官方 API 的前端封装：`{{Mixed N}}` 最终编译成官方指代格式 `图片N`。看官方 API 文档时要分清「模型层语法」与「LibTV 前端语法」，不要拿一层的证据否定另一层。
-
-### 8.2 顺序只能回读，不能自报
-
-`Mixed N` 的 N **必须**来自回读画布实时 `mixedListOrder`。用本地素材列表顺序、上传顺序或 `--left-add` 的传参顺序去推断，**会整体错位**（实测把三个语义全绑到错误素材上）。
-
-### 8.3 素材改名的连带影响
-
-- 资源节点改名：`libtv node <名> --name <新名>` 会因校验失败报 `params.model 不能为空`，需补 `-s model=Lib Image` 才能通过。
-- 改名后**视频节点里的 `mixedList` / `imageList` 仍缓存旧 label**，审计读的是 `mixedList` 的 label，不是节点当前名。需用 `-s mixedList=<json>` 覆写 label 同步。
-- **同一语义名不得被多个素材共用**，否则语义指代失效且违反职责唯一。
-
-### 8.4 重连媒体边会清空 `{{Mixed N}}`
-
-`--left-rm` + `--left-add` 重建连接后，prompt 里的 `{{Mixed N}}` 会被清掉、`label` 变 `None`。**重连之后必须重写 prompt 并再次回读验证**。
-
-### 8.5 修一个节点的正确顺序
-
-1. 回读 `mixedListOrder` 拿真实顺序；
-2. 资源节点改名为语义名（补 `-s model=`）；
-3. 用 `-s mixedList=` 同步 label；
-4. 按真实顺序写 `@[语义名] {{Mixed N}}`，确保每个 Mixed 都被引用；
-5. 跑 `audit_canvas_nodes.py` 回读验证，零硬错误才算完成。
-
-> **自证陷阱**：用本 skill 自己的审计脚本验证本 skill 自己的规范，只能证明「符合书面约定」，不能证明「平台真的按这个绑定」。涉及平台行为的结论，必须以**前端渲染实测**或**平台回写结果**为准。
-
-### 8.6 §8.2 的踩坑会真实复发,以及审计脚本只能用在生成前
-
-2026-07-27 在同一个 skill 内、明知 §8.2 规则的情况下，批量建 4 个视频节点时**仍然按 `--left-add` 的连接顺序假设写 `Mixed N`，没有逐节点回读 `mixedListOrder` 再定稿**——4 个节点里 2 个（V1、V4）顺序整体错位或部分错位。视觉结果仍然凑合，是因为角色资产辨识度够高、模型自己"认出该放哪张图"掩盖了顺序错误，**不代表顺序写对了**。
-
-**教训**：知道规则不等于会应用规则；批量操作时更容易图快跳过"回读→再写"这一步。写完 N 个节点的最终 prompt 前，必须逐个跑一次 `libtv node <名>` 读 `mixedListOrder` 再落笔，不能凭建节点顺序推断，哪怕只是"批量重复同一套动作"也不能省。
-
-**另外，`audit_canvas_nodes.py` 的绑定检测只在生成前有效**：节点一旦真实生成过，平台就已经把 prompt 里的 `{{Mixed N}}` 改写成 `{{Image N}}`/`{{Portrait N}}`，而审计脚本的正则只认字面 `Mixed`，改写后再跑审计会对每个已生成节点系统性报"画布 Mixed 未被提示词绑定"。这不是脚本的 bug，是用法超出了它的设计场景（`--pre-run` 门禁，不是生成后回溯审计）——生成后要复核绑定是否正确，只能靠直接读 `mixedListOrder` 和 prompt 里改写后的 token 手动核对，或者在**下次编辑同一节点、prompt 还原成 `{{Mixed N}}` 之前**跑审计。
-
-官方入口仅用于人工核对和安装，不是 skill 运行时依赖：https://www.liblib.tv/cli
+官方入口只用于安装与人工核对，不是 skill 运行时外部知识依赖。

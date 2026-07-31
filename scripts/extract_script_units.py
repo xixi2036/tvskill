@@ -29,14 +29,16 @@ UI_PANEL_RE = re.compile(
     r"^【(?:第[^】]*任务|目标[：:]|任务时限|系统提示|检测到|.*好感度)[^】]*】$"
 )
 # 音效标签后常带内容：【音效：玻璃碎裂】。与 SUBTITLE_RE 同样收全半角冒号。
-SFX_MARK_RE = re.compile(r"^△\s*【音效[：:）)]?")
+SFX_MARK_RE = re.compile(r"^(?:△\s*)?【音效(?:[：:]|】)")
 VISUAL_PREFIX_RE = re.compile(r"^△")
 BRACKET_LINE_RE = re.compile(r"^【([^】]*)】$")
 # 剧本里的台词行（`角色名：台词`），与 _shared_patterns.DIALOGUE_RE（提示词里的
 # `{}` 台词真值锁）语义完全不同，故不同名，避免被误当成同一判据。
 # 场次元信息行（人物表/场景/时间），形式上像台词行但不是台词。
 META_LINE_RE = re.compile(r"^(?:人物|角色|场景|地点|时间|时间地点|服装|道具)\s*[：:]")
-SCRIPT_DIALOGUE_LINE_RE = re.compile(r"^[^△【\s][^：:]{0,12}(?:VO)?(?:（[^）]*）)?[：:]")
+SCRIPT_DIALOGUE_LINE_RE = re.compile(
+    r"^[^△【\s][^：:]{0,12}(?:OS|VO|OV)?(?:（[^）]*）)?[：:]"
+)
 
 
 CN_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
@@ -90,6 +92,20 @@ def read_paragraphs(path: Path) -> list[str]:
     ]
 
 
+def normalize_markdown_structure(text: str) -> str:
+    """Remove Markdown wrappers only for structural matching.
+
+    Keep the original paragraph as the extracted source text. This lets .md
+    scripts use headings such as ``# 第1集`` / ``## 1-1 地点`` and bold meta
+    labels without changing dialogue or visual facts in the coverage ledger.
+    """
+    value = re.sub(r"^#{1,6}\s+", "", text).strip()
+    if value.startswith("**") and value.endswith("**") and len(value) > 4:
+        value = value[2:-2].strip()
+    value = re.sub(r"^\*\*([^*]+)\*\*([：:].*)$", r"\1\2", value)
+    return value
+
+
 def classify(text: str) -> str:
     if SFX_MARK_RE.match(text):
         return "sfx"
@@ -115,7 +131,8 @@ def extract(
     current_episode: int | None = None
     current_scene = ""
     for text in paragraphs:
-        episode_match = EPISODE_RE.match(text)
+        structural_text = normalize_markdown_structure(text)
+        episode_match = EPISODE_RE.match(structural_text)
         if episode_match:
             parsed = parse_episode_number(episode_match.group(1))
             if parsed is None:
@@ -123,15 +140,15 @@ def extract(
             current_episode = parsed
             current_scene = ""
             continue
-        scene_match = SCENE_RE.match(text)
+        scene_match = SCENE_RE.match(structural_text)
         if scene_match:
-            current_scene = text
+            current_scene = structural_text
             continue
         if episode is not None and current_episode != episode:
             continue
-        if META_LINE_RE.match(text):
+        if META_LINE_RE.match(structural_text):
             continue
-        if SCRIPT_DIALOGUE_LINE_RE.match(text):
+        if SCRIPT_DIALOGUE_LINE_RE.match(structural_text):
             # 台词行同样入库（kind=dialogue），供语音对账对源；
             # 默认输出只含画面类，画面对账的条数不受影响。
             units.append(
@@ -139,7 +156,7 @@ def extract(
                     "episode": current_episode,
                     "scene": current_scene,
                     "kind": "dialogue",
-                    "text": text,
+                    "text": structural_text,
                 }
             )
             continue
