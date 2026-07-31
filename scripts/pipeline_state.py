@@ -317,12 +317,11 @@ def cmd_status(args, state: dict) -> int:
     print(f"  本步闸：{next_step['gate']}")
     if blocked:
         print(f"  ⚠ 前置未完成：{blocked}")
-    # 必须带上用户本次传的 --dir：否则照提示继续会跑到 cwd，
-    # 在错误目录新建状态文件，导致状态分叉。
-    dir_flag = f" --dir {args.dir}" if str(args.dir) != "." else ""
+    # 必须带上用户本次传的 --dir：否则照提示继续会跑到别的目录，导致状态分叉。
+    # （--dir 现为必填参数，args.dir 已是 resolve() 后的绝对路径，此处直接原样带出。）
     print(
         f"  跑闸：python3 scripts/pipeline_state.py check {args.episode} "
-        f"{next_step['id']}{dir_flag} --script <原剧本> --episode-no <集号数字>"
+        f"{next_step['id']} --dir {args.dir} --script <原剧本> --episode-no <集号数字>"
     )
     return 0
 
@@ -375,10 +374,28 @@ def main() -> int:
     parser.add_argument("command", choices=("status", "check", "complete", "reset"))
     parser.add_argument("episode", help="集号，例如 EP01")
     parser.add_argument("step", nargs="?", help="步骤 id")
-    parser.add_argument("--dir", type=Path, default=Path.cwd(), help="交付目录")
+    parser.add_argument("--dir", type=Path, default=None, help="交付目录（不传则报错，不会静默用当前目录）")
     parser.add_argument("--script", type=Path, help="原剧本 .docx/.txt/.md")
     parser.add_argument("--episode-no", type=int, help="原剧本中的集号数字")
     args = parser.parse_args()
+    if args.dir is None:
+        # ★2026-08-01 UX修:此前默认 Path.cwd()，忘传 --dir 时会静默在当前目录（可能是
+        # 从 skill 自身源码目录里直接跑的）新建 <集号>-run_state.json，污染 skill 仓库
+        # 且不自知（实测复现过一次）。改成硬性要求显式传参，宁可多打几个字，不可静默写错地方。
+        print("ERROR: 必须显式传 --dir 指定交付目录（不会默认用当前目录，防止误写进 skill 自身仓库）", file=sys.stderr)
+        return 2
+    args.dir = args.dir.resolve()
+    if not args.dir.exists():
+        print(
+            f"ERROR: 目录不存在：{args.dir}\n"
+            f"  先创建交付目录再跑：mkdir -p {args.dir}\n"
+            f"  或检查 --dir 路径是否打错",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.dir.is_dir():
+        print(f"ERROR: --dir 指向的不是目录：{args.dir}", file=sys.stderr)
+        return 2
     try:
         state = load_state(args.episode, args.dir)
         if args.command == "status":
