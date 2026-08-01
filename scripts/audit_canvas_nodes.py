@@ -27,10 +27,11 @@ from _shared_patterns import (  # noqa: E402
     PLANNING_RE,
     SEAT_BOARD_RE,
 )
+from _shot_budget import shot_budget_messages  # noqa: E402
 
 
 TVMAO_BINDING_RE = re.compile(
-    r"(?<![\w\]])@?(?P<kind>图片|视频|音频)\s*(?P<number>\d+)"
+    r"(?<![A-Za-z0-9_@\]])@?(?P<kind>图片|视频|音频)\s*(?P<number>\d+)"
     r"(?:（(?P<label>[^）\n]+)）)?"
 )
 CANVAS_MENTION_RE = re.compile(
@@ -38,13 +39,15 @@ CANVAS_MENTION_RE = re.compile(
     r"(?:（(?P<label>[^）\n]+)）)?"
 )
 LEGACY_MIXED_RE = re.compile(
-    r"\{\{(?:Mixed|Image|Portrait)\s+\d+\}\}|\bMixed\s+\d+\b"
+    r"\{\{(?:Mixed|Image|Portrait)\s+\d+\}\}|"
+    r"(?<![A-Za-z0-9_@])Mixed\s+\d+(?![A-Za-z0-9_])"
 )
 SYNC_CUE_RE = re.compile(r"(?:他说|她说|开口说|说出).{0,12}\{")
 CHINESE_SHOT_RE = re.compile(r"^镜头\s*(\d+)\s*：", re.M)
 CONTINUOUS_RE = re.compile(
     r"单一连续镜头[，,、 ]*无剪切|single continuous take,\s*no cuts", re.I
 )
+LONG_TAKE_INTENT_RE = re.compile(r"长镜头叙事意图\s*[：:]\s*\S+")
 CLEAN_FRAME_RE = re.compile(r"首帧|续接帧|验收末帧|稳定末帧")
 CROWD_RE = re.compile(r"学生|众人|人群|群演|全班|全场")
 WIDE_RE = re.compile(r"大全景|中全景|全景")
@@ -59,6 +62,7 @@ COMPLEX_ACTION_RE = re.compile(
     r"掠过|群体反应|全班.{0,12}(?:转头|安静)|爆炸|特效"
 )
 ROBOTIC_PROSODY_RE = re.compile(r"放慢|停半拍|一字一顿|拖长|逐字|匀速|均匀")
+VOICE_BOOTSTRAP_RE = re.compile(r"一次性(?:周妍画外)?音色采样预览")
 DEFAULT_MODEL_ID = "doubao-seedance-2-0-fast-260128"
 SUPPORTED_MODEL_PREFIXES = ("doubao-seedance-2-0-", "cm-seedance-2.0-")
 GENERIC_TOKENS = {
@@ -108,7 +112,10 @@ def category(value: str, kind: str = "") -> str:
         return "population"
     if re.search(r"场景|教室|房间|走廊|餐厅|街道|地点", value):
         return "scene"
-    if re.search(r"道具|报告|钢笔|手机|文件|纸张|杯|门|车", value):
+    if re.search(
+        r"道具|报告|钢笔|手机|钥匙|杂志|手袋|皮包|鞋|文件|纸张|杯|门|车",
+        value,
+    ):
         return "prop"
     return "character"
 
@@ -145,6 +152,22 @@ def node_id(detail: dict[str, Any]) -> str:
 def node_status(detail: dict[str, Any]) -> str:
     value = detail.get("status") or detail.get("runStatus") or ""
     return str(value).lower()
+
+
+def node_run_count(detail: dict[str, Any]) -> int:
+    """Conservatively infer whether a video node has consumed its one-shot budget."""
+    for key in ("runCount", "generationCount", "attemptCount"):
+        value = detail.get(key)
+        if isinstance(value, int) and value >= 0:
+            return value
+    history = detail.get("history")
+    if isinstance(history, list) and history:
+        return len(history)
+    if detail.get("content") or detail.get("media"):
+        return 1
+    if node_status(detail) and node_status(detail) != "idle":
+        return 1
+    return 0
 
 
 def node_params(detail: dict[str, Any]) -> dict[str, Any]:
@@ -258,7 +281,8 @@ def serialize_canvas_prompt(
 
 
 def audit_node(
-    detail: dict[str, Any], *, require_compliance: bool = False
+    detail: dict[str, Any], *, require_compliance: bool = False,
+    require_one_shot: bool = False,
 ) -> tuple[list[str], list[str], dict[str, Any]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -318,22 +342,49 @@ def audit_node(
             errors.append("Shot N 编号不连续")
         if CONTINUOUS_RE.search(prompt):
             errors.append("同一提示词同时声明连续镜头和 Shot N 剪切")
-        if duration <= 15 and len(exact_shots) > 3:
-            errors.append(f"{duration} 秒包含 {len(exact_shots)} 个生成 Shot；10–15 秒通常最多承载 2–3 个清楚事件")
-        elif duration and len(exact_shots) > 1 and duration / len(exact_shots) < 3:
-            warnings.append(f"{duration} 秒包含 {len(exact_shots)} 镜，平均不足 3 秒")
+        budget_errors, budget_warnings = shot_budget_messages(
+            duration, len(exact_shots)
+        )
+        errors.extend(budget_errors)
+        warnings.extend(budget_warnings)
     elif not chinese_shots and not CONTINUOUS_RE.search(prompt):
         errors.append("未声明“单一连续镜头，无剪切”，也没有精确 Shot N: 多镜结构")
+    elif not chinese_shots:
+        budget_errors, budget_warnings = shot_budget_messages(
+            duration,
+            1,
+            continuous_take=True,
+            has_long_take_intent=bool(LONG_TAKE_INTENT_RE.search(prompt)),
+        )
+        errors.extend(budget_errors)
+        warnings.extend(budget_warnings)
 
-    dialogue = DIALOGUE_RE.findall(prompt)
-    has_sync = bool(SYNC_CUE_RE.search(prompt))
+    dialogue_matches = list(DIALOGUE_RE.finditer(prompt))
+    dialogue = [match.group(1) for match in dialogue_matches]
+
+    def is_offscreen_voice(match: re.Match[str]) -> bool:
+        context = prompt[max(0, match.start() - 100):match.start()]
+        return bool(re.search(r"(?:画外|电话)?\s*(?:VO|OS|旁白).{0,36}$", context, re.I))
+
+    on_screen_dialogue = [match for match in dialogue_matches if not is_offscreen_voice(match)]
+    has_sync = bool(on_screen_dialogue and SYNC_CUE_RE.search(prompt))
     has_os_vo = bool(OS_VO_RE.search(prompt))
+    voice_bootstrap = bool(VOICE_BOOTSTRAP_RE.search(prompt))
     audio_inputs = buckets["音频"]
     if dialogue or has_os_vo:
-        if not audio_inputs:
+        if not audio_inputs and not voice_bootstrap:
             errors.append("存在对白/OS/VO，但没有 audio-input 入边")
+        if voice_bootstrap:
+            if audio_inputs:
+                errors.append("音色采样预览不得绑定 audio-input；它只用于建立首条角色音色")
+            if len(dialogue) != 1:
+                errors.append("音色采样预览必须只含一段原剧本台词")
+            if "不作为正式成片或续接来源" not in prompt:
+                errors.append("音色采样预览必须声明不作为正式成片或续接来源")
+            if not re.search(r"不要\s*(?:bgm|BGM|音乐)|无音乐", prompt):
+                errors.append("音色采样预览必须明确禁用音乐")
         spoken_subjects: set[str] = set()
-        for match in DIALOGUE_RE.finditer(prompt):
+        for match in on_screen_dialogue:
             context = prompt[max(0, match.start() - 140):match.start()]
             found = re.findall(r"<主体\d+>", context)
             if found:
@@ -342,7 +393,7 @@ def audit_node(
             r"@?音频\d+（[^）]+）.{0,50}?只控制\s*(<主体\d+>|[^\s，。；：,、]{0,10}(?:VO|OS|旁白)).{0,24}?音色",
             prompt,
         ))
-        missing = sorted(spoken_subjects - controlled_subjects)
+        missing = [] if voice_bootstrap else sorted(spoken_subjects - controlled_subjects)
         if missing:
             errors.append(f"说话主体缺少对应独立音色绑定：{', '.join(missing)}")
         short_dialogue = any(len(re.sub(r"\W", "", line)) <= 6 for line in dialogue)
@@ -397,6 +448,11 @@ def audit_node(
         warnings.append(f"素材合规状态尚未 active：{non_active}")
 
     status = node_status(detail)
+    run_count = node_run_count(detail)
+    if require_one_shot and run_count > 0:
+        errors.append(
+            f"一次性视频预算已消耗：runCount={run_count}；禁止同节点或同提示词重新生成"
+        )
     if status in {"succeeded", "generating"}:
         warnings.append(f"节点状态为 {status}；修改输入时应新建版本节点")
 
@@ -409,6 +465,7 @@ def audit_node(
         "shots": len(exact_shots) or len(chinese_shots) or 1,
         "fingerprint": node_fingerprint(detail),
         "status": status,
+        "runCount": run_count,
     }
 
 
@@ -461,6 +518,11 @@ def collect_live_details(
             if str(item.get("type") or "") == "video-generator"
         ]
     if not targets:
+        if audit_all:
+            raise ValueError(
+                "项目内没有 video-generator 节点；Markdown 中写出的参考名不构成画布关联，"
+                "必须先创建节点、连接真实入边并再次运行 --all/--pre-run 审计"
+            )
         raise ValueError("必须用 --node 指定 video-generator 节点，或显式使用 --all")
 
     compliance_payload = run_tvmao(tvmao, ["compliance", "status", "--project", str(project)])
@@ -512,7 +574,7 @@ def main() -> int:
     parser.add_argument("--tvmao")
     parser.add_argument(
         "--pre-run", action="store_true",
-        help="要求 idle 且全部素材合规状态为 active；CLI 2.0.0 节点须从网页运行",
+        help="要求 idle、runCount=0 且全部素材合规状态为 active；CLI 2.0.0 节点须从网页运行",
     )
     parser.add_argument("--receipt", type=Path, help="零硬错误时写出 Markdown 节点指纹凭证")
     args = parser.parse_args()
@@ -539,7 +601,11 @@ def main() -> int:
     total_warnings = 0
     receipt_rows: list[dict[str, Any]] = []
     for detail in details:
-        errors, warnings, summary = audit_node(detail, require_compliance=args.pre_run)
+        errors, warnings, summary = audit_node(
+            detail,
+            require_compliance=args.pre_run,
+            require_one_shot=args.pre_run,
+        )
         if args.pre_run and summary["status"] != "idle":
             errors.append(f"运行前门禁要求 idle；当前状态为 {summary['status'] or 'unknown'}")
         total_errors += len(errors)
@@ -547,6 +613,7 @@ def main() -> int:
         receipt_rows.append({
             "nodeId": summary["nodeId"], "name": summary["name"],
             "fingerprint": summary["fingerprint"], "warnings": len(warnings),
+            "runCount": summary["runCount"],
         })
         print(f"NODE: {summary['name']}")
         for error in errors:
@@ -570,11 +637,14 @@ def main() -> int:
             f"- 运行前模式：{'是' if args.pre_run else '否'}",
             "- 安全运行入口：TVMao 网页（CLI 2.0.0 未序列化 node-id mention）",
             "- 硬错误：0", "",
-            "| 节点 ID | 节点名 | 输入指纹 SHA-256 | 警告 |",
-            "|---|---|---|---:|",
+            "| 节点 ID | 节点名 | 输入指纹 SHA-256 | runCount | 警告 |",
+            "|---|---|---|---:|---:|",
         ]
         for row in receipt_rows:
-            lines.append(f"| `{row['nodeId']}` | {row['name']} | `{row['fingerprint']}` | {row['warnings']} |")
+            lines.append(
+                f"| `{row['nodeId']}` | {row['name']} | `{row['fingerprint']}` | "
+                f"{row['runCount']} | {row['warnings']} |"
+            )
         args.receipt.parent.mkdir(parents=True, exist_ok=True)
         args.receipt.write_text("\n".join(lines) + "\n", encoding="utf-8")
         print(f"RECEIPT: {args.receipt}")

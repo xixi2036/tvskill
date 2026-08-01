@@ -32,7 +32,7 @@ tvmao model get doubao-seedance-2-0-fast-260128
 |---|---|---|
 | `libtv node list -p <UUID>` 返回 `{nodes:[...]}` | `tvmao node list --project <int>` 直接返回数组 | 解析器改为数组，项目 ID 改为整数 |
 | `libtv node <id>` 兼做查询和修改 | `tvmao node get/update <id>` 明确分离 | 所有读写改用显式子命令 |
-| 节点可按展示名查找和更新 | `node create/update` 没有节点名参数 | 更新必须显式传 `--node VNN=<节点ID>`；缺映射时创建新节点 |
+| 节点可按展示名查找和更新 | `node create/update` 没有节点名参数 | 更新必须显式传 `--node VNN=<节点ID>`；缺映射时创建新节点；创建时显式传不重叠 `--x/--y` |
 | `-t video` | `--type video-generator` | 使用 TVMao 语义节点类型 |
 | 展示模型名 `Seedance 2.0 Fast VIP` | 稳定 `modelId=doubao-seedance-2-0-fast-260128` | 旧名只在本地兼容映射中存在，写入使用稳定 ID |
 | `params.settings={ratio,resolution,duration,enableSound}` | `params.prompt/ratio/resolution/duration` 扁平 | 删除嵌套 settings 与 `modeType` |
@@ -111,6 +111,9 @@ python3 scripts/sync_delivery_markdown.py <本集.md> \
 ```
 
 没有节点映射时创建新节点。TVMao 没有可靠的节点名查找合同，禁止按前缀猜测节点。
+同步器必须先读取现有节点边界，把新节点按段号排在画布下方的可见网格，并在写后回读
+`position`。不得省略 `--x/--y`：TVMao 默认把新节点放在 `(0,0)`，多节点会完全重叠，
+造成“接口已创建、画布看不见”的假失败。
 
 同步脚本只调用 `node create` 或 `node update`，绝不调用 `node run`。写后必须重新执行：
 

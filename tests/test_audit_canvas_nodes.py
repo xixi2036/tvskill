@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -68,6 +69,13 @@ def bad_detail() -> dict:
 
 
 class CanvasNodeAuditTests(unittest.TestCase):
+    def test_audit_all_rejects_project_without_video_nodes_as_unassociated(self):
+        with patch.object(audit_canvas_nodes, "run_tvmao", return_value=[]):
+            with self.assertRaisesRegex(ValueError, "没有 video-generator 节点"):
+                audit_canvas_nodes.collect_live_details(
+                    "tvmao", 97, [], audit_all=True, asset_labels={}
+                )
+
     def test_good_live_contract_passes(self):
         errors, warnings, summary = audit_canvas_nodes.audit_node(good_detail())
         self.assertEqual(errors, [])
@@ -112,6 +120,12 @@ class CanvasNodeAuditTests(unittest.TestCase):
         errors, _, _ = audit_canvas_nodes.audit_node(detail)
         self.assertTrue(any("尚未编译" in error for error in errors))
 
+    def test_legacy_mixed_token_adjacent_to_chinese_text_is_blocked(self):
+        detail = good_detail()
+        detail["params"]["prompt"] += "说完后继续使用Mixed 2的音色。"
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertTrue(any("尚未编译" in error for error in errors))
+
     def test_exact_text_generation_is_blocked(self):
         detail = good_detail()
         detail["params"]["prompt"] += "纸面清晰显示且只显示“反向做空”。"
@@ -134,7 +148,26 @@ class CanvasNodeAuditTests(unittest.TestCase):
         errors, _, _ = audit_canvas_nodes.audit_node(detail)
         self.assertTrue(any("不会显示素材关联 chip" in error for error in errors))
 
-    def test_four_native_shots_in_short_node_are_blocked(self):
+    def test_named_prop_asset_matches_semantic_prop_prefix(self):
+        item = {"label": "手袋-A", "type": "image-input"}
+        self.assertTrue(
+            audit_canvas_nodes.binding_matches_asset("道具-手袋-A", item, "图片")
+        )
+        key_item = {"label": "钥匙-A", "type": "image-input"}
+        self.assertTrue(
+            audit_canvas_nodes.binding_matches_asset("道具-钥匙-A", key_item, "图片")
+        )
+
+    def test_numbered_bindings_joined_by_chinese_text_are_both_parsed(self):
+        bindings = audit_canvas_nodes.parse_bindings(
+            "图片5（道具-手机-A）与图片6（道具-钥匙-A）分别锁单一实例"
+        )
+        self.assertEqual(
+            bindings,
+            [("图片", 5, "道具-手机-A"), ("图片", 6, "道具-钥匙-A")],
+        )
+
+    def test_four_native_shots_in_twelve_second_node_are_allowed(self):
         detail = good_detail()
         params = detail["params"]
         params["duration"] = 12
@@ -146,8 +179,40 @@ class CanvasNodeAuditTests(unittest.TestCase):
             "\nShot 3: 固定道具近景，纸张保持静止。"
             "\nShot 4: 固定环境镜头，学生保持低幅微动。"
         )
+        errors, warnings, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertEqual(errors, [])
+        self.assertFalse(any("万物生式节拍建议" in warning for warning in warnings))
+
+    def test_fifteen_second_five_shot_node_matches_wanwu_budget(self):
+        detail = good_detail()
+        params = detail["params"]
+        params["duration"] = 15
+        params["prompt"] = params["prompt"].replace(
+            "单一连续镜头，无剪切。中近景稳定机位，",
+            "\nShot 1: 双人中景，建立人物关系。\n"
+            "Shot 2: <主体1>反应近景，自然眨眼。\n"
+            "Shot 3: 中近景稳定机位，",
+        ) + (
+            "\nShot 4: 对方反应近景，保持自然呼吸。"
+            "\nShot 5: 双人中景，回到关系落幅。"
+        )
+        errors, warnings, summary = audit_canvas_nodes.audit_node(detail)
+        self.assertEqual(errors, [])
+        self.assertEqual(summary["shots"], 5)
+        self.assertFalse(any("建议" in warning and "Shot" in warning for warning in warnings))
+
+    def test_long_continuous_take_requires_explicit_story_intent(self):
+        detail = good_detail()
+        detail["params"]["duration"] = 15
         errors, _, _ = audit_canvas_nodes.audit_node(detail)
-        self.assertTrue(any("4 个生成 Shot" in error for error in errors))
+        self.assertTrue(any("缺少长镜头叙事意图" in error for error in errors))
+
+        detail["params"]["prompt"] = detail["params"]["prompt"].replace(
+            "单一连续镜头，无剪切。",
+            "长镜头叙事意图：保持审讯式压迫和不中断表演。单一连续镜头，无剪切。",
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertEqual(errors, [])
 
     def test_robotic_short_line_prosody_is_blocked(self):
         detail = good_detail()
@@ -172,6 +237,50 @@ class CanvasNodeAuditTests(unittest.TestCase):
         detail["_tvskillInputs"][0]["compliance"] = "pending"
         errors, _, _ = audit_canvas_nodes.audit_node(detail, require_compliance=True)
         self.assertTrue(any("未全部 active" in error for error in errors))
+
+    def test_pre_run_rejects_consumed_one_shot_budget_even_if_idle(self):
+        detail = good_detail()
+        detail["history"] = [{"url": "https://example.invalid/take.mp4"}]
+        errors, _, summary = audit_canvas_nodes.audit_node(
+            detail, require_one_shot=True
+        )
+        self.assertEqual(summary["runCount"], 1)
+        self.assertTrue(any("一次性视频预算已消耗" in error for error in errors))
+
+    def test_one_shot_voice_bootstrap_preview_may_omit_audio_input(self):
+        detail = good_detail()
+        detail["_tvskillInputs"] = [
+            item for item in detail["_tvskillInputs"] if item["type"] != "audio-input"
+        ]
+        detail["params"]["prompt"] = (
+            "一次性音色采样预览，不作为正式成片或续接来源。"
+            "将 @[图片:char]（单知影） 定义为 <主体1>；"
+            "参考 @[图片:first]（首帧-EP03-V01）；"
+            "将 @[图片:scene]（场景状态-Z班-S1） 定义为 <场景1>。"
+            "单一连续镜头，无剪切。<主体1>只说一句：{你，很吵。}。"
+            "对白前后留干净空白，不要音乐。"
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(
+            detail, require_one_shot=True
+        )
+        self.assertEqual(errors, [])
+
+    def test_offscreen_phone_vo_does_not_require_on_screen_subject_voice_or_first_frame(self):
+        detail = good_detail()
+        detail["_tvskillInputs"] = [
+            item for item in detail["_tvskillInputs"] if item["nodeId"] != "first"
+        ]
+        detail["_tvskillInputs"][1]["label"] = "周妍VO-音色"
+        detail["params"]["prompt"] = (
+            "将 @[图片:char]（单知影） 定义为 <主体1>；"
+            "@[音频:voice]（周妍VO-音色） 只控制周妍VO的音色；"
+            "将 @[图片:scene]（场景状态-Z班-S1） 定义为 <场景1>。"
+            "单一连续镜头，无剪切。<主体1>全程闭口倾听，"
+            "周妍以画外电话VO说出 {宝，不会是你要求的吧？}。"
+            "不要音乐，无字幕、水印或 Logo。"
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertEqual(errors, [])
 
     def test_classroom_crowd_requires_functional_orientation(self):
         detail = good_detail()

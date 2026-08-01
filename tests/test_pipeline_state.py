@@ -105,6 +105,41 @@ class PipelineStateTests(unittest.TestCase):
         ok, detail = self.check("entities")
         self.assertTrue(ok, detail)
 
+    def test_assets_gate_rejects_pending_candidate_images(self):
+        self.delivery.write_text(
+            ASSETS_FULL
+            + """
+## 公共素材清单
+
+| 素材 | 类型 | 用途 |
+|---|---|---|
+| 单知影候选身份图-v2 | 图片（待生成确认） | 锁人物身份 |
+| 色卡-系统空间 | 图片 | 已验收色彩锚点 |
+""",
+            encoding="utf-8",
+        )
+        ok, detail = self.check("assets")
+        self.assertFalse(ok)
+        self.assertIn("不能把 assets 标为完成", detail)
+        self.assertIn("单知影候选身份图-v2", detail)
+
+    def test_assets_gate_accepts_only_confirmed_images(self):
+        self.delivery.write_text(
+            ASSETS_FULL
+            + """
+## 公共素材清单
+
+| 素材 | 类型 | 用途 |
+|---|---|---|
+| 单知影-CANON-v3 | 图片 | 已验收身份锚点 |
+| 色卡-系统空间-CANON-v3 | 图片 | 已验收色彩锚点 |
+| 单知影-音色占位槽（待人工上传） | 音频（待上传） | 不阻塞图片资产阶段 |
+""",
+            encoding="utf-8",
+        )
+        ok, detail = self.check("assets")
+        self.assertTrue(ok, detail)
+
     def test_coverage_refuses_without_script(self):
         self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
         ok, detail = self.check("coverage", None)
@@ -161,6 +196,25 @@ class PipelineStateTests(unittest.TestCase):
                 ok, detail = MODULE.check_step(step, "EP01", self.dir, None, None)
                 self.assertFalse(ok)
                 self.assertIn("机器无法自证", detail)
+
+    def test_canvas_and_generate_accept_explicit_manual_confirmation(self):
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "assets" / "libtv-video-prompts.template.md"
+        ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
+        self.delivery.write_text(template, encoding="utf-8")
+        for step in ("canvas", "generate"):
+            with self.subTest(step):
+                ok, detail = MODULE.check_step(
+                    step,
+                    "EP01",
+                    self.dir,
+                    None,
+                    None,
+                    manual_confirmed=True,
+                )
+                self.assertTrue(ok, detail)
+                self.assertIn("--manual-confirmed", detail)
 
     def test_review_step_accepts_completed_audit(self):
         template = (

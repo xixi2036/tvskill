@@ -24,6 +24,7 @@ from _shared_patterns import (  # noqa: E402
     LOWER_BODY_LOCK_RE,
     EMPTY_SCENE_RE,
 )
+from _shot_budget import shot_budget_messages  # noqa: E402
 
 
 SEGMENT_HEADING_RE = re.compile(r"^## 生成段 V(\d{2})｜(.+)$", re.M)
@@ -45,6 +46,7 @@ LEGACY_SHOT_BLOCK_RE = re.compile(
 CONTINUOUS_TAKE_RE = re.compile(
     r"单一连续镜头[，,、 ]*无剪切|single continuous take,\s*no cuts", re.I
 )
+LONG_TAKE_INTENT_RE = re.compile(r"长镜头叙事意图\s*[：:]\s*\S+")
 DURATION_RE = re.compile(r"^- 时长：(\d+)秒$", re.M)
 VOICE_STATUS_RE = re.compile(r"^- 音色状态：(.+)$", re.M)
 DELIVERY_GRADE_RE = re.compile(r"^- 交付等级：(预览|正式)$", re.M)
@@ -650,18 +652,22 @@ def validate(
                 errors.append(f"{label} Shot N 编号必须从 1 连续递增")
             if continuous_take:
                 errors.append(f"{label} 不能同时声明连续镜头和 Shot N 剪切")
-            if duration <= 15 and len(shots) > 3:
-                errors.append(
-                    f"{label} {duration} 秒包含 {len(shots)} 个生成 Shot；"
-                    "10–15 秒原生生成通常最多承载 2–3 个清楚事件"
-                )
-            elif duration and len(shots) > 1 and duration / len(shots) < 3:
-                warnings.append(
-                    f"{label} {duration} 秒包含 {len(shots)} 镜，平均不足 3 秒；"
-                    "请确认没有把 v3 内部剪辑节拍误当成模型 Shot"
-                )
+            budget_errors, budget_warnings = shot_budget_messages(
+                duration, len(shots)
+            )
+            errors.extend(f"{label} {message}" for message in budget_errors)
+            warnings.extend(f"{label} {message}" for message in budget_warnings)
         elif not continuous_take:
             errors.append(f"{label} 必须声明“单一连续镜头，无剪切”或使用精确 Shot N:")
+        else:
+            budget_errors, budget_warnings = shot_budget_messages(
+                duration,
+                1,
+                continuous_take=True,
+                has_long_take_intent=bool(LONG_TAKE_INTENT_RE.search(prompt)),
+            )
+            errors.extend(f"{label} {message}" for message in budget_errors)
+            warnings.extend(f"{label} {message}" for message in budget_warnings)
 
         for pattern, description in BANNED_PROMPT_PATTERNS:
             if pattern.search(prompt):

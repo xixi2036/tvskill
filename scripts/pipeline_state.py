@@ -43,7 +43,7 @@ STEPS = [
         "id": "assets",
         "title": "资产生产与验收",
         "requires": ["entities"],
-        "gate": "资产清单每一行都写了形态，含精确文字的道具必须标注定版道具图",
+        "gate": "资产清单每一行都写了形态，公共素材中的图片均已脱离候选/待生成/待确认状态",
     },
     {
         "id": "segments",
@@ -177,6 +177,7 @@ def check_step(
     directory: Path,
     script: Path | None,
     episode_no: int | None,
+    manual_confirmed: bool = False,
 ) -> tuple[bool, str]:
     delivery = delivery_path(episode, directory)
     units_file = directory / f"{episode}-画面单元.json"
@@ -221,6 +222,29 @@ def check_step(
         blank = [row[1].strip() for row in rows if not row[2].strip()]
         if blank:
             return False, f"这些资产没有写形态：{blank}"
+        public_assets = section(text, "## 公共素材清单")
+        if not public_assets.strip():
+            return False, "交付 Markdown 缺少公共素材清单，无法证明生成资产已经验收"
+        public_rows = re.findall(
+            r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|$",
+            public_assets,
+            re.M,
+        )
+        pending_images = [
+            name.strip()
+            for name, media_type, usage in public_rows
+            if name.strip() not in {"素材", "---"}
+            and "图片" in media_type
+            and re.search(
+                r"候选|待生成|待确认|待验收|未验收|待返工",
+                f"{name} {media_type} {usage}",
+            )
+        ]
+        if pending_images:
+            return False, (
+                "这些图片仍是候选或待生成/待确认状态，不能把 assets 标为完成："
+                f"{pending_images}；逐层视觉验收并晋升 canonical 后再更新公共素材清单"
+            )
         return True, f"{len(rows)} 项资产均已写明形态"
 
     if step_id == "segments":
@@ -264,15 +288,20 @@ def check_step(
         ok, output = run_validator(delivery, script, episode_no)
         if not ok:
             return False, f"上游确定性校验已失效，先修好再推进：\n{output}"
-        if step_id in ("canvas", "generate"):
+        if step_id in ("canvas", "generate") and not manual_confirmed:
             # 此前这两步只跑一遍单集校验就返回通过，画布可以从没连过、成片可以不存在，
             # 等于闸是空转的。机器无法替用户连画布与授权生成，但可以拒绝"无凭据即通过"。
             return False, (
                 f"{step_id} 步需要真实画布/成片证据，机器无法自证：\n"
                 "  1) 先按 SKILL.md §8 跑 sync dry-run 与 audit_canvas_nodes（零硬错误）；\n"
                 "  2) generate 还需用户逐节点授权并完成十轴审计；\n"
-                "  3) 人工确认上述证据后，用 complete 显式标记，"
-                "并在交付 Markdown 里写明凭证。"
+                "  3) 人工确认上述证据并在交付 Markdown 里写明凭证后，"
+                "用 complete --manual-confirmed 显式标记。"
+            )
+        if step_id in ("canvas", "generate"):
+            return True, (
+                f"{step_id} 的机器校验有效，且调用方已通过 "
+                "--manual-confirmed 确认真实画布/成片证据"
             )
         if step_id == "review":
             # 「待二审」是为了打破"必须先自称已通过才能过机器闸"的死循环而存在的
@@ -340,7 +369,14 @@ def cmd_check(args, state: dict, mark_done: bool) -> int:
             file=sys.stderr,
         )
         return 1
-    ok, detail = check_step(args.step, args.episode, args.dir, args.script, args.episode_no)
+    ok, detail = check_step(
+        args.step,
+        args.episode,
+        args.dir,
+        args.script,
+        args.episode_no,
+        manual_confirmed=args.manual_confirmed,
+    )
     print(detail)
     if not ok:
         state["steps"][args.step] = "failed"
@@ -378,6 +414,11 @@ def main() -> int:
     parser.add_argument("--dir", type=Path, default=Path.cwd(), help="交付目录")
     parser.add_argument("--script", type=Path, help="原剧本 .docx/.txt/.md")
     parser.add_argument("--episode-no", type=int, help="原剧本中的集号数字")
+    parser.add_argument(
+        "--manual-confirmed",
+        action="store_true",
+        help="仅用于 canvas/generate：确认真实画布或成片审计凭证已落盘",
+    )
     args = parser.parse_args()
     try:
         state = load_state(args.episode, args.dir)
