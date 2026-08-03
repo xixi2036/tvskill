@@ -140,6 +140,30 @@ class CanvasNodeAuditTests(unittest.TestCase):
         errors, _, _ = audit_canvas_nodes.audit_node(detail)
         self.assertTrue(any("没有同类型入边" in error for error in errors))
 
+    def test_generic_only_semantic_cannot_wave_through_wrong_asset(self):
+        detail = good_detail()
+        detail["_tvskillInputs"][0]["label"] = "TVSkill-EP03-李威-独立人物图"
+        detail["params"]["prompt"] = detail["params"]["prompt"].replace(
+            "@[图片:char]（单知影）", "@[图片:char]（独立人物图）"
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertTrue(any("无可校验标识" in error for error in errors))
+
+    def test_short_suffix_still_disambiguates_generic_role_label(self):
+        detail = good_detail()
+        detail["_tvskillInputs"][0]["label"] = "TVSkill-EP03-角色A-独立人物图"
+        detail["params"]["prompt"] = detail["params"]["prompt"].replace(
+            "@[图片:char]（单知影）", "@[图片:char]（角色A）"
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertEqual(errors, [])
+
+        detail["params"]["prompt"] = detail["params"]["prompt"].replace(
+            "@[图片:char]（角色A）", "@[图片:char]（角色B）"
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertTrue(any("语义“角色B”与实际素材" in error for error in errors))
+
     def test_plain_numbered_reference_is_not_a_canvas_association(self):
         detail = good_detail()
         detail["params"]["prompt"] = detail["params"]["prompt"].replace(

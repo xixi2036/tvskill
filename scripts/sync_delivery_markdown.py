@@ -268,7 +268,10 @@ def resolve_sync_mode(
 
 
 def mapping_lookup(mapping: dict[str, str], row: dict[str, Any]) -> str | None:
-    candidates = [row["asset"], row["semantic"], row["semantic"].strip("@[]")]
+    candidates = [
+        row["asset"], row["semantic"],
+        row["semantic"].removeprefix("@[").removesuffix("]"),
+    ]
     matches = {
         value for key, value in mapping.items()
         if any(normalized(key) == normalized(candidate) for candidate in candidates)
@@ -553,9 +556,11 @@ def main() -> int:
                     )
 
         compliance_payload = run([tvmao, "compliance", "status", "--project", str(args.project)], cwd=cwd)
+        if not isinstance(compliance_payload, list):
+            raise ValueError("tvmao compliance status 顶层必须是数组")
         compliance = {
             object_id(item): str(item.get("status") or "")
-            for item in compliance_payload if isinstance(compliance_payload, list) and isinstance(item, dict)
+            for item in compliance_payload if isinstance(item, dict)
         }
 
         results: list[dict[str, Any]] = []
