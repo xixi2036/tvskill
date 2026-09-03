@@ -23,6 +23,9 @@ from _shared_patterns import (  # noqa: E402
     SEAT_BOARD_RE,
     LOWER_BODY_LOCK_RE,
     EMPTY_SCENE_RE,
+    SUPPORTED_RATIOS,
+    SUPPORTED_RESOLUTIONS,
+    SUPPORTED_MODELS,
 )
 from _shot_budget import shot_budget_messages  # noqa: E402
 from _fast_drama_contract import prompt_quality_messages  # noqa: E402
@@ -478,21 +481,26 @@ def validate(
     model_match = MODEL_RE.search(text)
     if not model_match:
         errors.append("缺少节点默认模型")
-    elif model_match.group(1).strip() not in {
-        "Seedance 2.0 VIP",
-        "Seedance 2.0 Fast VIP",
-    }:
-        errors.append("节点模型必须为 Seedance 2.0 VIP 或 Seedance 2.0 Fast VIP")
+    elif model_match.group(1).strip() not in SUPPORTED_MODELS:
+        errors.append(
+            "节点模型不在支持集合内："
+            + "、".join(sorted(SUPPORTED_MODELS))
+        )
     aspect_match = ASPECT_RATIO_RE.search(text)
     if not aspect_match:
         errors.append("缺少节点默认画幅")
-    elif aspect_match.group(1).strip() != "9:16":
-        errors.append("节点默认画幅必须为 9:16")
+    elif aspect_match.group(1).strip() not in SUPPORTED_RATIOS:
+        errors.append(
+            "节点默认画幅不在平台支持集合内：" + "、".join(sorted(SUPPORTED_RATIOS))
+        )
     resolution_match = RESOLUTION_RE.search(text)
     if not resolution_match:
         errors.append("缺少节点默认分辨率")
-    elif resolution_match.group(1).strip() != "480P":
-        errors.append("节点默认分辨率必须为 480P")
+    elif resolution_match.group(1).strip().lower() not in SUPPORTED_RESOLUTIONS:
+        errors.append(
+            "节点默认分辨率不在平台支持集合内："
+            + "、".join(sorted(SUPPORTED_RESOLUTIONS))
+        )
 
     matches = list(SEGMENT_HEADING_RE.finditer(text))
     if not matches:

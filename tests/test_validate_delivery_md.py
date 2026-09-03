@@ -622,6 +622,47 @@ class DeliveryMarkdownTests(unittest.TestCase):
         self.assertTrue(any("没有对应的音色占位槽" in e for e in self.errors(invalid)))
 
 
+class PlatformParameterDomainTests(unittest.TestCase):
+    """画幅/分辨率/模型闸按平台真实支持面校验，不按单一项目约定写死。
+
+    此前写死「必须 9:16 / 必须 480P」。参考剧《万妖图录传》七季全部 1280×720（16:9），
+    在这条上直接硬失败——产线连下游都走不到，而它并不是平台限制：
+    `tvmao model get` 的 inputSchema.enum 明确支持 1:1/16:9/9:16/4:3/3:4。
+    """
+
+    def errors(self, text: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "delivery.md"
+            path.write_text(text, encoding="utf-8")
+            return MODULE.validate(path, None)[0]
+
+    def test_landscape_ratio_is_accepted(self):
+        landscape = VALID.replace("- 画幅：9:16", "- 画幅：16:9")
+        self.assertFalse(
+            [e for e in self.errors(landscape) if "画幅" in e],
+            "16:9 是平台支持档，不应被判死",
+        )
+
+    def test_higher_resolution_is_accepted(self):
+        hd = VALID.replace("- 分辨率：480P", "- 分辨率：720p")
+        self.assertFalse([e for e in self.errors(hd) if "分辨率" in e])
+
+    def test_ratio_outside_platform_enum_still_fails(self):
+        # 放开不等于不管：平台没有的档位仍须拦下
+        bogus = VALID.replace("- 画幅：9:16", "- 画幅：21:9")
+        self.assertTrue(any("画幅" in e for e in self.errors(bogus)))
+
+    def test_resolution_outside_platform_enum_still_fails(self):
+        bogus = VALID.replace("- 分辨率：480P", "- 分辨率：4K")
+        self.assertTrue(any("分辨率" in e for e in self.errors(bogus)))
+
+    def test_original_vertical_project_still_passes(self):
+        # 向后兼容：原竖屏项目的 9:16/480P 组合不受影响
+        self.assertFalse(
+            [e for e in self.errors(VALID) if "画幅" in e or "分辨率" in e]
+        )
+
+
 class StatelessReadGateTests(unittest.TestCase):
     """无状态读闸：模型只拿到这一段 prompt，指向"另一次生成"的措辞它无法解析。
 

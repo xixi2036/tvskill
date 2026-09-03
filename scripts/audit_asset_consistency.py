@@ -7,7 +7,14 @@ import argparse
 import collections
 import re
 import struct
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _shared_patterns import (  # noqa: E402
+    SUPPORTED_RATIOS,
+    SUPPORTED_RESOLUTIONS,
+)
 
 
 ASSET_RE = re.compile(
@@ -157,10 +164,23 @@ def audit(root: Path) -> tuple[list[str], list[str], dict]:
         errors.append(f"STYLE 锁定行不统一：{sorted(style_lines)}")
     if model_lines != {"Seedance 2.0 VIP"}:
         errors.append(f"模型合同不统一或不是 Pro：{sorted(model_lines)}")
-    if ratios != {"9:16"}:
+    # 这两条的意图是**跨集一致性**（报错文案本就写「不统一」），
+    # 但此前实现成「必须等于 9:16 / 480P」——意图与实现分叉：
+    # 横屏题材（参考剧《万妖图录传》七季全部 1280×720 即 16:9）即使全剧口径完全统一，
+    # 也会在这里被判死。现按意图校验：全剧只能有一档，且该档须是平台真实支持的取值。
+    if len(ratios) > 1:
         errors.append(f"视频画幅合同不统一：{sorted(ratios)}")
-    if resolutions != {"480P"}:
+    elif ratios and not ratios <= SUPPORTED_RATIOS:
+        errors.append(
+            f"视频画幅不在平台支持集合内：{sorted(ratios)}，支持 {sorted(SUPPORTED_RATIOS)}"
+        )
+    if len(resolutions) > 1:
         errors.append(f"视频分辨率合同不统一：{sorted(resolutions)}")
+    elif resolutions and not {r.lower() for r in resolutions} <= SUPPORTED_RESOLUTIONS:
+        errors.append(
+            f"视频分辨率不在平台支持集合内：{sorted(resolutions)}，"
+            f"支持 {sorted(SUPPORTED_RESOLUTIONS)}"
+        )
     if not all("3D CG" in line for line in medium_lines):
         errors.append(f"媒介声明不统一：{sorted(medium_lines)}")
 

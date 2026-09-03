@@ -56,3 +56,23 @@ LOWER_BODY_LOCK_RE = re.compile(
 
 # 空场景：与"可见人群"冲突的空间状态。
 EMPTY_SCENE_RE = re.compile(r"空教室|空场景|空房间|无人物(?:教室|场景|空间)")
+
+
+# ── 平台真实支持的生成参数取值域 ──────────────────────────────────
+# 取自 `tvmao model get <modelId>` 的 inputSchema.enum（2026-09-04 实查
+# doubao-seedance-2-0-fast-260128 与 doubao-seedance-2-5-260628）。
+#
+# 这不是项目偏好。此前 validate_delivery_md 与 audit_asset_consistency 各自
+# 写死「必须 9:16 / 必须 480P」——那是某个竖屏项目的约定被当成了平台约束：
+# 参考剧《万妖图录传》七季全部 1280×720（16:9），在这条上直接硬失败，
+# 产线连下游都走不到。闸的职责应是「值是平台支持的 + 全剧只用一档」，
+# 具体用哪一档由交付文件声明。
+#
+# 放共享模块而非各脚本内联，理由见本文件抬头：同一判据分两处写必然分叉。
+SUPPORTED_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4"}
+SUPPORTED_RESOLUTIONS = {"480p", "720p", "1080p"}
+SUPPORTED_MODELS = {
+    "Seedance 2.0 VIP",
+    "Seedance 2.0 Fast VIP",
+    "Seedance 2.5",
+}
