@@ -129,7 +129,7 @@ def meaningful_tokens(value: str) -> list[str]:
         part = re.sub(r"^(?:TVSkill|EP\d+)$", "", part, flags=re.I)
         for generic in sorted(GENERIC_TOKENS, key=len, reverse=True):
             part = part.replace(generic, "")
-        if not part or part in GENERIC_TOKENS or len(part) < 2:
+        if not part or part in GENERIC_TOKENS:
             continue
         tokens.append(normalized(part))
     return tokens
@@ -141,7 +141,7 @@ def binding_matches_asset(semantic: str, item: dict[str, Any], kind: str) -> boo
         return False
     tokens = meaningful_tokens(semantic)
     if not tokens:
-        return True
+        return False
     actual_norm = normalized(actual)
     return any(token in actual_norm for token in tokens)
 
@@ -261,7 +261,10 @@ def serialize_canvas_prompt(
             return f"{kind}{index}"
         if not binding_matches_asset(semantic, item, kind):
             actual = item.get("label") or node
-            errors.append(f"画布引用 @[{kind}:{node}] 语义“{semantic}”与实际素材“{actual}”不一致")
+            if meaningful_tokens(semantic):
+                errors.append(f"画布引用 @[{kind}:{node}] 语义“{semantic}”与实际素材“{actual}”不一致")
+            else:
+                errors.append(f"画布引用 @[{kind}:{node}] 语义“{semantic}”无可校验标识，无法确认对应“{actual}”")
         return f"{kind}{index}（{semantic}）"
 
     serialized = CANVAS_MENTION_RE.sub(replacement, prompt)
@@ -323,7 +326,10 @@ def audit_node(
             continue
         if not binding_matches_asset(semantic, bucket[number - 1], kind):
             actual = bucket[number - 1].get("label") or bucket[number - 1].get("nodeId")
-            errors.append(f"@{kind}{number} 语义“{semantic}”与实际素材“{actual}”不一致")
+            if meaningful_tokens(semantic):
+                errors.append(f"@{kind}{number} 语义“{semantic}”与实际素材“{actual}”不一致")
+            else:
+                errors.append(f"@{kind}{number} 语义“{semantic}”无可校验标识，无法确认对应“{actual}”")
     unreferenced = [
         f"{kind}{index}"
         for kind, bucket in buckets.items()
