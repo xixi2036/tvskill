@@ -175,6 +175,36 @@ class TimecodeScriptFormatTests(unittest.TestCase):
         self.assertEqual(units[0]["episode"], 2)
         self.assertTrue(units[0]["scene"].startswith("场景 1"))
 
+    def test_timecodes_are_lifted_into_structured_fields(self):
+        units = MODULE.extract(self.STANDARD, episode=1)
+        self.assertEqual([u["start_sec"] for u in units], [0, 2])
+        # 第一条画面镜到下一条画面镜之间是 2 秒
+        self.assertEqual(units[0]["duration_sec"], 2)
+        # 末条画面镜没有下一个切点，不给 duration_sec（由场次头区间或成片时长兜底）
+        self.assertNotIn("duration_sec", units[-1])
+
+    def test_dialogue_timecode_does_not_create_a_phantom_cut(self):
+        # 台词与所在镜头共用时间码，不构成新切点；
+        # 若拿它算时长，一个镜头会被切成若干假镜、刀长统计整体偏短
+        paragraphs = [
+            "第01集",
+            "场景 1　外　日　荒野  00:00-00:20",
+            "[00:00] 全景，姜月初跌坐在尸体中。",
+            "姜月初（内心）：[00:03] 我……穿越了。",
+            "姜月初（内心）：[00:05] 穿到了妖魔横行的大唐。",
+            "[00:08] 镜头切向虎妖尸体。",
+        ]
+        units = MODULE.extract(paragraphs, episode=1)
+        self.assertEqual(len(units), 2)
+        # 0s 那一镜的时长应是到 8s，而不是到台词的 3s
+        self.assertEqual(units[0]["duration_sec"], 8)
+
+    def test_marker_style_script_gets_no_timecode_fields(self):
+        paragraphs = ["第1集", "1-1 荒村 外 雨", "▲ 暴雨过后的荒废村落。"]
+        units = MODULE.extract(paragraphs, episode=1)
+        self.assertNotIn("start_sec", units[0])
+        self.assertNotIn("duration_sec", units[0])
+
     def test_marker_style_script_still_parses(self):
         # 两种体例必须并存：▲ 体（抽取型剧本）不得因本次修复受影响
         paragraphs = [

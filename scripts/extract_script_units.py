@@ -225,10 +225,48 @@ def extract(
                     "text": f"【字幕：{subtitle}】",
                 }
             )
+    annotate_timecodes(units)
     selected = [unit for unit in units if unit["kind"] in kinds]
     for index, unit in enumerate(selected, start=1):
         unit["index"] = index
     return selected
+
+
+def parse_timecode(text: str) -> int | None:
+    """`[00:03]` / `[1:02:03]` → 起始秒；无时间码返回 None。"""
+    match = TIMECODE_PREFIX_RE.match(text)
+    if not match:
+        return None
+    parts = [int(part) for part in match.group(0).strip("[]").split(":")]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    return parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def annotate_timecodes(units: list[dict[str, object]]) -> None:
+    """时间码体剧本给出了真实切点，把它从正文里提成结构字段。
+
+    没有时间码的体例（▲ 体）不受影响——不写这两个字段，下游按原有方式估时长。
+    `duration_sec` 取到**下一条画面单元**的起点：台词行与所在镜头共用时间码，
+    不构成新的切点，用它算会把一个镜头切成若干假镜。
+    末条画面单元没有下一个切点，故不给 duration_sec，由场次头区间或成片时长兜底。
+    """
+    visual_positions = [
+        index for index, unit in enumerate(units) if unit["kind"] != "dialogue"
+    ]
+    starts: dict[int, int] = {}
+    for index, unit in enumerate(units):
+        start = parse_timecode(str(unit["text"]))
+        if start is not None:
+            unit["start_sec"] = start
+            starts[index] = start
+    for order, index in enumerate(visual_positions):
+        if index not in starts:
+            continue
+        for nxt in visual_positions[order + 1:]:
+            if nxt in starts and starts[nxt] > starts[index]:
+                units[index]["duration_sec"] = starts[nxt] - starts[index]
+                break
 
 
 def render_table(units: list[dict[str, object]]) -> str:
