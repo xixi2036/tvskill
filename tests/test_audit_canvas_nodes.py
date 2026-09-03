@@ -379,6 +379,56 @@ class CanvasNodeAuditTests(unittest.TestCase):
         self.assertFalse(any("骨盆、膝盖和坐姿朝向" in error for error in errors))
 
 
+class IdentitySovereigntyTests(unittest.TestCase):
+    """每个出场 <主体N> 必须有且只有一份身份锚。
+
+    Rule of 12 只卡参考图**数量**，不卡**职责**。这两种形状都真实发生过：
+      ① 覆盖缺口——正文用了 <主体1> 却一张角色图都没绑，人脸每段随机、跨段无法一致
+      ② 双 Primary——两张图都锚定同一个 <主体N>，参考竞争导致身份漂移
+    ②正是十轴审计「参考污染／身份漂移 → 减少竞争参考」记录过的失败，
+    此前只能事后返工才发现。
+    """
+
+    def test_subject_without_identity_anchor_is_blocked(self):
+        detail = good_detail()
+        prompt = detail["params"]["prompt"]
+        stripped = re.sub(r"将[^。\n]{0,80}?定义为\s*<主体\d+>", "画面中出现一名年轻女性", prompt)
+        self.assertNotEqual(prompt, stripped, "夹具里应当存在身份锚定句")
+        detail["params"]["prompt"] = stripped
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertTrue(
+            any("没有任何身份锚定" in e for e in errors),
+            f"用了 <主体N> 却无锚定应被拦下，实际 errors={errors}",
+        )
+
+    def test_two_images_claiming_the_same_subject_are_blocked(self):
+        detail = good_detail()
+        detail["params"]["prompt"] += (
+            "\n将 @[图片:scene]（场景状态-Z班-S1） 定义为 <主体1>。"
+        )
+        errors, _, _ = audit_canvas_nodes.audit_node(detail)
+        self.assertTrue(
+            any("同一职责只能有一个主权来源" in e for e in errors),
+            f"同一主体被两张图锚定应被拦下，实际 errors={errors}",
+        )
+
+    def test_properly_anchored_node_is_not_flagged(self):
+        # 零误报：真值形态（每个主体恰好一份锚定）不得报错
+        errors, _, _ = audit_canvas_nodes.audit_node(good_detail())
+        self.assertFalse([e for e in errors if "身份锚定" in e or "主权来源" in e])
+
+    def test_anchor_is_recognised_in_both_canonical_and_serialized_form(self):
+        # 审计既可能拿到存储 prompt（@[图片:nodeId]），也可能拿到 history 的实际提交（图片N）
+        for text in (
+            "将 @[图片:n-abc]（角色-吴馨） 中的稳定身份特征定义为 <主体1>",
+            "将 图片1（角色-吴馨） 中的稳定身份特征定义为 <主体1>",
+        ):
+            with self.subTest(text=text):
+                hits = list(audit_canvas_nodes.IDENTITY_ANCHOR_RE.finditer(text))
+                self.assertEqual(len(hits), 1)
+                self.assertEqual(hits[0].group("subject"), "<主体1>")
+
+
 class WebSerializationParityTests(unittest.TestCase):
     """serialize_canvas_prompt 必须与网页端 model-facing 序列化逐字节一致。
 

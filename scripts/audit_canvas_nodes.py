@@ -63,6 +63,13 @@ COMPLEX_ACTION_RE = re.compile(
     r"掠过|群体反应|全班.{0,12}(?:转头|安静)|爆炸|特效"
 )
 ROBOTIC_PROSODY_RE = re.compile(r"放慢|停半拍|一字一顿|拖长|逐字|匀速|均匀")
+# 身份锚定句：把某张图声明为某个主体的身份来源。
+# 兼容画布 canonical（@[图片:nodeId]（语义））与运行时序列化（图片N（语义））两种形态，
+# 因为审计既可能拿到存储 prompt，也可能拿到 history 里的实际提交内容。
+IDENTITY_ANCHOR_RE = re.compile(
+    r"(?P<ref>@?\[?图片[:：]?[^\]）]{0,24}\]?（[^）]*）|图片\d+（[^）]*）)"
+    r"[^。；\n]{0,60}?定义为\s*(?P<subject><主体\d+>)"
+)
 VOICE_BOOTSTRAP_RE = re.compile(r"一次性(?:周妍画外)?音色采样预览")
 DEFAULT_MODEL_ID = "doubao-seedance-2-0-fast-260128"
 SUPPORTED_MODEL_PREFIXES = ("doubao-seedance-2-0-", "cm-seedance-2.0-")
@@ -417,9 +424,33 @@ def audit_node(
         missing = [] if voice_bootstrap else sorted(spoken_subjects - controlled_subjects)
         if missing:
             errors.append(f"说话主体缺少对应独立音色绑定：{', '.join(missing)}")
+
         short_dialogue = any(len(re.sub(r"\W", "", line)) <= 6 for line in dialogue)
         if short_dialogue and ROBOTIC_PROSODY_RE.search(prompt):
             errors.append("六字以内短台词使用了放慢、停顿、逐字或匀速控制，存在机器人节奏风险")
+
+    # ── 职责主权：每个出场 <主体N> 必须有且只有一份身份锚 ──────────────
+    # 现有 Rule of 12 只卡参考图**数量**，不卡**职责**。真实踩过两种形状：
+    #   ① 覆盖缺口：正文用了 <主体1> 却一张角色图都没绑，人物脸每段随机、跨段无法一致
+    #   ② 双 Primary：两张图都声明锚定同一个 <主体N>，参考竞争直接导致身份漂移
+    # 后者正是十轴审计里「参考污染／身份漂移 → 减少竞争参考」记录过的失败形状，
+    # 此前只能事后返工才发现，这里把它前移成事前拦截。
+    identity_owner: dict[str, list[str]] = {}
+    for match in IDENTITY_ANCHOR_RE.finditer(prompt):
+        identity_owner.setdefault(match.group("subject"), []).append(match.group("ref"))
+    for subject, refs in sorted(identity_owner.items()):
+        if len(set(refs)) > 1:
+            errors.append(
+                f"{subject} 同时被 {'、'.join(sorted(set(refs)))} 声明为身份锚定："
+                "同一职责只能有一个主权来源，多张竞争会导致身份漂移"
+            )
+    unowned = sorted(set(re.findall(r"<主体\d+>", prompt)) - set(identity_owner))
+    if unowned:
+        errors.append(
+            f"以下主体在正文出场但没有任何身份锚定：{', '.join(unowned)}；"
+            "每个可识别人物必须有一份角色图声明「定义为 <主体N>…严格按此图渲染」，"
+            "否则该人物的五官与服装每次生成都是随机的，跨段无法一致"
+        )
 
     # Stop at the structured tail. Otherwise the last Shot block absorbs the
     # global SOUND/CONSTRAINTS/NOT sections and false-matches words such as
