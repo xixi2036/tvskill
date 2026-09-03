@@ -122,6 +122,7 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 4. 完整读取 [万物生实战 Craft 补充](references/libtv/wanwu-field-craft.md)：过冲量、反英雄景别与音画距离耦合三项官方规范未覆盖、但被真实上线成片反复验证的手法；与既有合同冲突时以既有合同为准。
 5. 项目没有现成素材、需要先造资产时，完整读取 [资产生产合同](references/libtv/asset-production-contract.md)。
 6. 只有用户要求实际操作 TVMao CLI 时，才读取 [TVMao 画布合同（兼容文件名）](references/libtv/libtv-canvas-contract.md)并核对本机版本与模型 schema。
+7. 只有用户明确要求某镜位试用 Seedance 2.5 时，才读取 [Seedance 2.5 适配（预研·未接入生产）](references/libtv/seedance-2.5-adaptation.md)；`validate_delivery_md.py` 当前只接受 2.0 VIP/Fast VIP 模型名，2.5 尚未进入生产白名单，其余节点继续按第 3 步的 Seedance 2.0 适配生产。
 
 ## 核心知识库模块
 
