@@ -26,6 +26,8 @@ from _shared_patterns import (  # noqa: E402
     OS_VO_RE,
     PLANNING_RE,
     SEAT_BOARD_RE,
+    SUPPORTED_RATIOS,
+    SUPPORTED_RESOLUTIONS,
 )
 from _shot_budget import shot_budget_messages  # noqa: E402
 from _fast_drama_contract import prompt_quality_messages  # noqa: E402
@@ -484,10 +486,21 @@ def audit_node(
         warnings.append(f"模型不是 TVSkill 支持的 Seedance 2.0 modelId：{model}")
     elif model != DEFAULT_MODEL_ID:
         warnings.append(f"模型不是默认 {DEFAULT_MODEL_ID}：{model}")
-    if params.get("ratio") != "9:16":
-        warnings.append(f"画幅不是 9:16：{params.get('ratio')}")
-    if str(params.get("resolution") or "").lower() != "480p":
-        warnings.append(f"分辨率不是 480p：{params.get('resolution')}")
+    # 与 validate_delivery_md / audit_asset_consistency 保持同一口径：
+    # 9:16 / 480p 是某个竖屏项目的默认值，不是平台约束（平台支持 1:1/16:9/9:16/4:3/3:4
+    # 与 480p/720p/1080p）。此前这里写死 9:16，横屏题材每个节点都会收到一条无效告警，
+    # 真正该看的告警被噪声淹没。改为：不在平台支持面内才告警。
+    ratio = str(params.get("ratio") or "")
+    if ratio and ratio not in SUPPORTED_RATIOS:
+        warnings.append(
+            f"画幅不在平台支持集合内：{ratio}，支持 {sorted(SUPPORTED_RATIOS)}"
+        )
+    resolution = str(params.get("resolution") or "").lower()
+    if resolution and resolution not in SUPPORTED_RESOLUTIONS:
+        warnings.append(
+            f"分辨率不在平台支持集合内：{params.get('resolution')}，"
+            f"支持 {sorted(SUPPORTED_RESOLUTIONS)}"
+        )
 
     non_active = [
         str(item.get("label") or item.get("nodeId") or "")
