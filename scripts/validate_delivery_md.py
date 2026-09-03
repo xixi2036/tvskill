@@ -145,6 +145,10 @@ STYLE_LOCK_RE = re.compile(r"^[^\n]*(?:美学|质感|色调|film|grain|aesthetic
 ASSET_ANCHOR_RE = re.compile(r"严格按此图渲染|视觉锚定.{0,24}不可改造")
 # 同样不能用 \b：#7A4FBD暗紫 这种紧贴中文的写法才是真实语料里的常态。
 INLINE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}(?![0-9A-Fa-f])")
+# 色卡「本段调用」的自然语言写法，取自万物生·问心真实语料的高频措辞。
+COLOR_CALLOUT_RE = re.compile(
+    r"重点调用|重点呈现|本段光的颜色|主色|环境底色|色调主色|色板中的"
+)
 NAMED_IRON_RULE_RE = re.compile(r"[^\s，。；：]{2,12}铁律")
 # NOT 后面未必有空格：中文语料里普遍写成 NOT卡通渲染+NOT三维动画。
 NOT_CHAIN_RE = re.compile(r"NOT\s*\S+.{0,80}?NOT\s*\S+", re.S | re.I)
@@ -678,6 +682,20 @@ def validate(
             row for row in rows if "色卡" in f"{row[1]} {row[3]}"
         ]
         segments_with_color_card[actual] = bool(color_card_rows)
+        # 绑了色卡 ≠ 用了色卡。万物生·问心 113 条含色卡的真实提示词里，
+        # 49% 在锚定句之后还点名了本段实际调用的颜色及其落点，例如：
+        #   「本段光的颜色为烈日烤白的暖光 #F4E6C8 铸在沙地上，极短硬阴影 #6B5A47」
+        #   「重点调用石窟冷蓝 #3A4A5C 作为夜空冷调主色 + 岩崖砂岩 #C9A678 的环境底色」
+        # 只写「严格按此色板执行、不可偏离」而不点名落点，色卡对模型近乎无约束力——
+        # 这是「为满足规则而绑、绑完丢在一边」的典型形状。
+        if color_card_rows and not (
+            INLINE_HEX_RE.search(prompt) or COLOR_CALLOUT_RE.search(prompt)
+        ):
+            warnings.append(
+                f"V{actual} 绑定了色卡但未点名本段调用的颜色及其落点；"
+                "锚定句之后应写明重点调用哪几个色、分别落在哪个物件或光上"
+                "（真实语料 49% 如此写，只写「按色板执行」对模型约束力很弱）"
+            )
         text_strategy_by_segment[actual] = text_strategy
         segment_asset_names[actual] = [row[1] for row in rows]
         legacy_shots = [int(number) for number in LEGACY_SHOT_RE.findall(prompt)]
