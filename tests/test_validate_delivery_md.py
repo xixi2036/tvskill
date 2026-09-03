@@ -622,5 +622,54 @@ class DeliveryMarkdownTests(unittest.TestCase):
         self.assertTrue(any("没有对应的音色占位槽" in e for e in self.errors(invalid)))
 
 
+class StatelessReadGateTests(unittest.TestCase):
+    """无状态读闸：模型只拿到这一段 prompt，指向"另一次生成"的措辞它无法解析。
+
+    反向用例比正向更重要——词表是按真实语料收窄过的；
+    误杀合法写法会让整条产线卡住，比漏检一条更糟。
+    """
+
+    def _banned(self, text: str) -> list[str]:
+        return [
+            description
+            for pattern, description in MODULE.BANNED_PROMPT_PATTERNS
+            if pattern.search(text)
+        ]
+
+    def test_flags_reference_to_a_previous_generation(self):
+        for phrase in (
+            "不要像上次那样糊",
+            "前面那版光位打反了",
+            "沿用上一版的服装",
+            "参考上个版本",
+            "之前那版太快",
+            "上次生成的问题",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(
+                    "会话依赖措辞（模型看不到上一次生成）",
+                    self._banned(f"中景固定机位。{phrase}。<主体1> 起身。"),
+                )
+
+    def test_does_not_flag_audio_continuity_written_into_the_prompt(self):
+        # assets/libtv-video-prompts.template.md 的真实写法：声音层跨段延续是合法正文
+        text = "【声音设计】0-2秒：室内低频底噪延续上一段；2-5秒：<主体1> 的原声台词。"
+        self.assertEqual(self._banned(text), [])
+
+    def test_does_not_flag_the_mandatory_subject_lock_line(self):
+        # _fast_drama_contract 强制要求这两句，误杀会让所有正式段直接失败
+        for text in (
+            "主体标签锁定：本段仅使用 <主体N>；角色名不进正文。",
+            "本段共 3 个约 2–3 秒的硬切镜头。",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self._banned(text), [])
+
+    def test_does_not_flag_in_shot_narrative_ordering(self):
+        # 「之前」指镜内叙事先后，不是指上一次生成
+        text = "<主体1> 拿起他之前放在桌沿的钢笔，指腹擦过笔帽。"
+        self.assertEqual(self._banned(text), [])
+
+
 if __name__ == "__main__":
     unittest.main()
