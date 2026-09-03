@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import sys
 import unittest
 from unittest.mock import patch
@@ -10,6 +11,40 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import audit_canvas_nodes  # noqa: E402
+
+
+# 网页端 model-facing 序列化的参考实现。
+# 逐行复刻自 www.tvmao.net 生产 bundle（assets/index-BNk-Lo9n.js）中的 e0()/xE()：
+#
+#   const Are={image:"图片",video:"视频",audio:"音频"}
+#   const cg=/@\[(图片|视频|音频):([^\]]+)\]/g
+#   function xE(e){const t={image:0,video:0,audio:0};
+#     return e.map(n=>(t[n.kind]+=1,{...n,label:`${Are[n.kind]} ${t[n.kind]}`}))}
+#   function e0(e,t){const n=xE(t);
+#     return e.replace(cg,(r,o,a)=>{const i=N9[o],s=n.find(l=>l.nodeId===a&&l.kind===i);
+#       return s?s.label.replace(" ",""):""})}
+#
+# 注意两个易错点：
+#   1. cg 只吃 `@[类型:节点ID]`，紧随其后的 `（语义名）` 是普通正文，原样保留；
+#   2. 未匹配到同类型入边的 mention 被替换为空串（不是保留原文）。
+WEB_MENTION_RE = re.compile(r"@\[(图片|视频|音频):([^\]]+)\]")
+_WEB_KIND = {"图片": "image", "视频": "video", "音频": "audio"}
+_WEB_LABEL = {"image": "图片", "video": "视频", "audio": "音频"}
+
+
+def web_serialize(prompt: str, inputs: list[dict]) -> str:
+    counters = {"image": 0, "video": 0, "audio": 0}
+    labels: dict[tuple[str, str], str] = {}
+    for item in inputs:
+        kind = item["kind"]
+        counters[kind] += 1
+        labels[(kind, item["nodeId"])] = f"{_WEB_LABEL[kind]}{counters[kind]}"
+
+    def repl(match: re.Match[str]) -> str:
+        kind = _WEB_KIND[match.group(1)]
+        return labels.get((kind, match.group(2)), "")
+
+    return WEB_MENTION_RE.sub(repl, prompt)
 
 
 def good_detail() -> dict:
@@ -342,6 +377,79 @@ class CanvasNodeAuditTests(unittest.TestCase):
         errors, _, _ = audit_canvas_nodes.audit_node(detail)
         self.assertFalse(any("教学朝向" in error for error in errors))
         self.assertFalse(any("骨盆、膝盖和坐姿朝向" in error for error in errors))
+
+
+class WebSerializationParityTests(unittest.TestCase):
+    """serialize_canvas_prompt 必须与网页端 model-facing 序列化逐字节一致。
+
+    2026-09-04 用生产画布真实节点（project 138 / n-mfJQfdhE，4 入边）实测过一次一致；
+    本类把该结论固化为回归闸——网页若改序列化规则，这里立刻失败，
+    而不是等到成片出来才发现模型收到的输入与审计预测不符。
+    """
+
+    def _pair(self, prompt: str, spec: list[tuple[str, str]]) -> tuple[str, str]:
+        web_inputs = [{"kind": k, "nodeId": n} for k, n in spec]
+        tv_inputs = [
+            {
+                "nodeId": n,
+                "type": {"image": "image-input", "video": "video-input", "audio": "audio-input"}[k],
+                "label": "",
+            }
+            for k, n in spec
+        ]
+        tv, _errors, _count = audit_canvas_nodes.serialize_canvas_prompt(prompt, tv_inputs)
+        return web_serialize(prompt, web_inputs), tv
+
+    def test_matches_web_on_production_shaped_prompt(self):
+        prompt = (
+            "高端日韩风格化 3D 低饱和生活流家庭剧视觉美学。"
+            "将 @[图片:n-UQuY9gZY]（角色-吴馨） 中的稳定身份特征定义为 <主体1>。"
+            "将 @[图片:n-22kMOsWU]（角色-李承） 中的稳定身份特征定义为 <主体2>。"
+            "将 @[图片:n-pdRcy0eJ]（场景状态-李家卧室-夜-S2） 定义为 <场景1>。"
+            "参考 @[图片:n-0SXo3jeN]（色卡-李家卧室-夜） 的色彩关系。"
+        )
+        spec = [
+            ("image", "n-UQuY9gZY"),
+            ("image", "n-22kMOsWU"),
+            ("image", "n-pdRcy0eJ"),
+            ("image", "n-0SXo3jeN"),
+        ]
+        web, tv = self._pair(prompt, spec)
+        self.assertEqual(web, tv)
+        # 括号语义名是紧随 mention 的正文，两边都必须原样保留
+        self.assertIn("图片1（角色-吴馨）", tv)
+        self.assertNotIn("@[", tv)
+
+    def test_matches_web_across_three_media_kinds(self):
+        prompt = (
+            "@[图片:n-a]（单知影） 与 @[图片:n-b]（李威） 对坐；"
+            "动作参考 @[视频:n-v1]（动作-递物）；"
+            "音色 @[音频:n-au1]（单知影音色）与 @[音频:n-au2]（李威音色）。"
+        )
+        spec = [
+            ("image", "n-a"),
+            ("audio", "n-au1"),
+            ("image", "n-b"),
+            ("video", "n-v1"),
+            ("audio", "n-au2"),
+        ]
+        web, tv = self._pair(prompt, spec)
+        self.assertEqual(web, tv)
+        # 三类媒体各自从 1 连续编号，编号取决于入边顺序而非文中出现顺序
+        self.assertIn("图片1（单知影）", tv)
+        self.assertIn("图片2（李威）", tv)
+        self.assertIn("视频1（动作-递物）", tv)
+        self.assertIn("音频1（单知影音色）", tv)
+        self.assertIn("音频2（李威音色）", tv)
+
+    def test_matches_web_when_mention_has_no_matching_input(self):
+        prompt = "锁定 @[图片:n-present]（在场） 与 @[图片:n-missing]（缺失）。"
+        spec = [("image", "n-present")]
+        web, tv = self._pair(prompt, spec)
+        # 网页把无对应入边的 mention 替换为空串；审计侧必须同样处理，否则
+        # 预测出的模型输入会多出一段实际不存在的引用
+        self.assertEqual(web, tv)
+        self.assertNotIn("n-missing", tv)
 
 
 if __name__ == "__main__":

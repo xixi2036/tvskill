@@ -253,7 +253,10 @@ def serialize_canvas_prompt(
         hit = refs.get((kind, node))
         if hit is None:
             errors.append(f"画布引用 {match.group(0)} 没有同类型入边")
-            return ""
+            # 网页端正则只吃 `@[类型:节点ID]`，紧随其后的 `（语义名）` 是普通正文。
+            # 无对应入边时网页把 mention 换成空串、把括号文本原样留下，成为孤儿括号。
+            # 这里必须还原同样的残留，否则预测出的模型输入与实际不符。
+            return f"（{semantic}）" if semantic else ""
         index, item = hit
         seen.add((kind, node))
         if not semantic:
