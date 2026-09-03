@@ -27,13 +27,22 @@ EPISODE_RE = re.compile(
 # 原先漏匹配时该行被静默丢弃且 current_scene 不更新，
 # 导致其后所有画面单元被错误归属到上一场——比丢一行更难发现。
 SCENE_RE = re.compile(r"^(\d+)-(\d+)\s*(\S.*)$")
+# 时间码剧本的场次头：`场景 1　外　日　荒野战场  00:00-00:44`（含全角空格）。
+# 这里的数字是**场次序号**不是集号，故不参与 awaiting_first_scene 的集号自纠，
+# 否则「场景 1」会把当前集号改写成 1，整集画面单元被错误归属。
+STANDARD_SCENE_RE = re.compile(r"^场景\s*[0-9〇零一二三四五六七八九十百]+(?:[\s　]|$)")
 SUBTITLE_RE = re.compile(r"【字幕[：:]([^】]*)】")
 UI_PANEL_RE = re.compile(
     r"^【(?:第[^】]*任务|目标[：:]|任务时限|系统提示|检测到|.*好感度)[^】]*】$"
 )
 # 音效标签后常带内容：【音效：玻璃碎裂】。与 SUBTITLE_RE 同样收全半角冒号。
 SFX_MARK_RE = re.compile(r"^(?:△\s*)?【音效(?:[：:]|】)")
-VISUAL_PREFIX_RE = re.compile(r"^[△▲]")
+# 画面行前缀有两种体例：
+#   ①「▲/△」标记体（抽取型剧本）
+#   ②「[00:00] 」时间码体（标准剧本）——每个镜头带绝对时间码
+# 时间码本身只是入口层的切分信息，不进模型提示词（提示词层仍禁绝对时间码）。
+TIMECODE_PREFIX_RE = re.compile(r"^\[\d{1,3}:\d{2}(?::\d{2})?\]")
+VISUAL_PREFIX_RE = re.compile(r"^(?:[△▲]|\[\d{1,3}:\d{2}(?::\d{2})?\])")
 BRACKET_LINE_RE = re.compile(r"^【([^】]*)】$")
 # 剧本里的台词行（`角色名：台词`），与 _shared_patterns.DIALOGUE_RE（提示词里的
 # `{}` 台词真值锁）语义完全不同，故不同名，避免被误当成同一判据。
@@ -42,8 +51,11 @@ META_LINE_RE = re.compile(r"^(?:人物|角色|场景|地点|时间|时间地点|
 BRACKET_CAST_META_RE = re.compile(
     r"^【(?:出场人物|出场角色|人物|角色)\s*[：:][^】]*】$"
 )
+# 开头的负向断言不能省：`[00:00] 镜头从下往上摇…` 里，时间码自带的冒号会让
+# `[^：:]{0,12}[：:]` 命中（`[00` 三个非冒号字符 + `:`），把每一条画面描述
+# 都吞成台词行——标准剧本整集画面单元归零就是这么来的。
 SCRIPT_DIALOGUE_LINE_RE = re.compile(
-    r"^[^△【\s][^：:]{0,12}(?:OS|VO|OV)?(?:（[^）]*）)?[：:]"
+    r"^(?!\[\d{1,3}:\d{2})[^△【\s][^：:]{0,12}(?:OS|VO|OV)?(?:（[^）]*）)?[：:]"
 )
 
 
@@ -161,6 +173,11 @@ def extract(
             scene_episode = int(scene_match.group(1))
             if awaiting_first_scene and current_episode != scene_episode:
                 current_episode = scene_episode
+            current_scene = structural_text
+            awaiting_first_scene = False
+            continue
+        if STANDARD_SCENE_RE.match(structural_text):
+            # 「场景 1」里的数字是场次序号,不是集号,不参与集号自纠
             current_scene = structural_text
             awaiting_first_scene = False
             continue

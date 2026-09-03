@@ -123,5 +123,71 @@ class ExtractScriptUnitsTests(unittest.TestCase):
         self.assertEqual(MODULE.extract(paragraphs, episode=118), [])
 
 
+class TimecodeScriptFormatTests(unittest.TestCase):
+    """时间码体标准剧本（`场景 N … 00:00-00:44` + `[00:00] 画面`）的解析。
+
+    真实样本：万妖图录传-scripts-asian/01-第01集.docx。
+    修复前该体例画面单元抽取为 0，且每条画面描述被误判为台词——
+    因为 `[00:00]` 自带的冒号让 `[^：:]{0,12}[：:]` 命中。
+    script_units 是九步状态机第一步，它归零则整条产线在第一步停住。
+    """
+
+    STANDARD = [
+        "第01集",
+        "场景 1　外　日　荒野战场  00:00-00:44",
+        "人物：姜月初(破烂粗布衣)、裴长青(重伤官服)　　道具：虎妖尸体、破损囚车",
+        "[00:00] 镜头从下往上摇，阴沉的天空下，阳光透过云层洒在荒野上。",
+        "[00:02] 极近景特写，姜月初猛地睁开眼睛，瞳孔微缩，眼神惊恐。",
+        "姜月初（内心）：[00:03] 我……穿越了。",
+        "裴长青（虚弱）：[00:40] 过来，扶我起来。",
+    ]
+
+    def test_timecode_prefixed_lines_are_visual_units(self):
+        units = MODULE.extract(self.STANDARD, episode=1)
+        texts = [u["text"] for u in units]
+        self.assertEqual(len(units), 2, texts)
+        self.assertTrue(all(u["kind"] == "visual" for u in units), units)
+        self.assertTrue(texts[0].startswith("[00:00]"))
+
+    def test_timecode_line_is_not_swallowed_as_dialogue(self):
+        # 回归本体：时间码里的冒号不得让画面行命中台词正则
+        self.assertIsNone(
+            MODULE.SCRIPT_DIALOGUE_LINE_RE.match("[00:00] 镜头从下往上摇，阴沉的天空下。")
+        )
+        self.assertIsNotNone(
+            MODULE.SCRIPT_DIALOGUE_LINE_RE.match("姜月初（内心）：[00:03] 我……穿越了。")
+        )
+
+    def test_speaker_lines_still_land_in_the_voice_ledger(self):
+        units = MODULE.extract(self.STANDARD, episode=1, kinds=MODULE.VOICE_KINDS)
+        self.assertEqual([u["kind"] for u in units], ["dialogue", "dialogue"])
+        self.assertIn("穿越了", units[0]["text"])
+
+    def test_standard_scene_header_does_not_overwrite_episode_number(self):
+        # 「场景 1」里的 1 是场次序号；若被当成集号自纠，episode=2 的单元会全部丢失
+        paragraphs = [
+            "第02集",
+            "场景 1　内　夜　卧室  00:00-00:20",
+            "[00:00] 姜月初推门进屋。",
+        ]
+        units = MODULE.extract(paragraphs, episode=2)
+        self.assertEqual(len(units), 1, units)
+        self.assertEqual(units[0]["episode"], 2)
+        self.assertTrue(units[0]["scene"].startswith("场景 1"))
+
+    def test_marker_style_script_still_parses(self):
+        # 两种体例必须并存：▲ 体（抽取型剧本）不得因本次修复受影响
+        paragraphs = [
+            "第1集",
+            "1-1 荒村 外 雨",
+            "▲ 暴雨过后的荒废村落，残垣断壁遍布碎石瓦砾。",
+            "狼妖：（【狂暴】）：\"（嘶吼声）\"",
+        ]
+        units = MODULE.extract(paragraphs, episode=1)
+        self.assertEqual(len(units), 1, units)
+        self.assertEqual(units[0]["kind"], "visual")
+        self.assertTrue(units[0]["text"].startswith("▲"))
+
+
 if __name__ == "__main__":
     unittest.main()
