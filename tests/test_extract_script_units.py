@@ -175,6 +175,21 @@ class TimecodeScriptFormatTests(unittest.TestCase):
         self.assertEqual(units[0]["episode"], 2)
         self.assertTrue(units[0]["scene"].startswith("场景 1"))
 
+    def test_voice_table_carries_the_voice_section_header(self):
+        # 两张对账表在交付 Markdown 里是不同章节，校验器按章节名找表。
+        # voice 若打印「## 画面对账」，粘进交付文件会报「缺少章节：## 语音对账」，
+        # 而报错信息与手上的产物对不上，很难自查。
+        units = MODULE.extract(self.STANDARD, episode=1, kinds=MODULE.VOICE_KINDS)
+        table = MODULE.render_table(units, "voice")
+        self.assertTrue(table.startswith("## 语音对账"))
+        self.assertIn("| 序号 | 原剧本声音 | 所在段 | 对账 |", table)
+
+    def test_visual_table_keeps_the_visual_section_header(self):
+        units = MODULE.extract(self.STANDARD, episode=1)
+        table = MODULE.render_table(units, "visual")
+        self.assertTrue(table.startswith("## 画面对账"))
+        self.assertIn("| 序号 | 类型 | 原剧本画面指令 | 落点 | 处置 |", table)
+
     def test_timecodes_are_lifted_into_structured_fields(self):
         units = MODULE.extract(self.STANDARD, episode=1)
         self.assertEqual([u["start_sec"] for u in units], [0, 2])

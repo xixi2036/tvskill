@@ -269,7 +269,20 @@ def annotate_timecodes(units: list[dict[str, object]]) -> None:
                 break
 
 
-def render_table(units: list[dict[str, object]]) -> str:
+def render_table(units: list[dict[str, object]], kind: str = "visual") -> str:
+    """按 --kind 出对应的对账表头。
+
+    这两张表在交付 Markdown 里是**不同章节**（`## 画面对账` / `## 语音对账`），
+    校验器按章节名找表。此前 voice 也打印「画面对账」表头，
+    直接粘进交付文件会让 `缺少章节：## 语音对账` 报错，而报错信息与手上的产物对不上。
+    """
+    if kind == "voice":
+        header = ["## 语音对账", "", "| 序号 | 原剧本声音 | 所在段 | 对账 |", "|---|---|---|---|"]
+        rows = [
+            f"| {unit['index']} | {str(unit['text']).replace('|', '｜')} |  |  |"
+            for unit in units
+        ]
+        return "\n".join(header + rows)
     lines = [
         "## 画面对账",
         "",
@@ -313,7 +326,7 @@ def main() -> int:
     if args.format == "count":
         print(len(units))
     elif args.format == "table":
-        print(render_table(units))
+        print(render_table(units, args.kind))
     else:
         print(json.dumps(units, ensure_ascii=False, indent=2))
     return 0
