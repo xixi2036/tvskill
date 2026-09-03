@@ -318,6 +318,14 @@ class AuditImageAssetNodeTests(unittest.TestCase):
         errors, _ = MOD.audit(target, [], {}, [], True)
         self.assertEqual(errors, [])
 
+    def test_video_first_frame_is_not_misclassified_by_character_reference_words(self):
+        prompt = (
+            "资产类型：EP01-V01 的 9:16 干净视频首帧。"
+            "输出一张完整单幅影视画面，不是人物设定板。"
+            "参考图1（吴馨16:9人物三视图）只锁身份，不继承中性站姿。"
+        )
+        self.assertFalse(MOD.is_character_reference("", prompt))
+
 
 if __name__ == "__main__":
     unittest.main()

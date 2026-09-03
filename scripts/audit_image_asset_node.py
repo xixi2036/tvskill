@@ -41,6 +41,11 @@ CHARACTER_MULTI_VIEW_PROMPT_RE = re.compile(
     re.I | re.S,
 )
 CHARACTER_STILL_NAME_RE = re.compile(r"(?:人物剧照|角色剧照|剧照|表演锚|performance\s*anchor)", re.I)
+VIDEO_FRAME_OUTPUT_RE = re.compile(
+    r"资产类型[：:].{0,40}(?:干净视频首帧|视频首帧|干净首帧|视频场景锚)"
+    r"|输出.{0,40}(?:完整)?单幅影视画面",
+    re.I | re.S,
+)
 HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}\b")
 DIRECT_STILL_NEGATION_RE = re.compile(
     r"(?:不得|不应|不能|不生成|未生成|不出现|禁止|严禁|避免|排除|无|未)\s*$",
@@ -59,6 +64,8 @@ FUTURE_STILL_STATE_RE = re.compile(
 
 
 def is_character_reference(name: str, prompt: str) -> bool:
+    if VIDEO_FRAME_OUTPUT_RE.search(prompt):
+        return False
     return bool(
         CHARACTER_REFERENCE_NAME_RE.search(name)
         or CHARACTER_REFERENCE_PROMPT_RE.search(prompt)
