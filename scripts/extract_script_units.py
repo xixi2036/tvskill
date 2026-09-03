@@ -12,14 +12,17 @@ import argparse
 import json
 import re
 import sys
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
 
-# 集号行允许同行带标题（「第1集 开局系统」），也接受中文数字。
+# 集号行允许同行带标题（「第1集 开局系统」）或冒号，也接受中文数字。
 # 原先要求整行只有集号，遇到带标题的剧本会一条单元都抽不到，
 # 而报错信息说的是"请确认集号"，把人引向错误方向。
-EPISODE_RE = re.compile(r"^第\s*([0-9〇零一二三四五六七八九十百]+)\s*集(?:\s|$)")
+EPISODE_RE = re.compile(
+    r"^第\s*([0-9〇零一二三四五六七八九十百]+)\s*集(?:(?:\s*[：:])|\s|$)"
+)
 # 场次号与描述之间不强制空白：中文剧本常写「1-2课间走廊 日 内」。
 # 原先漏匹配时该行被静默丢弃且 current_scene 不更新，
 # 导致其后所有画面单元被错误归属到上一场——比丢一行更难发现。
@@ -30,12 +33,15 @@ UI_PANEL_RE = re.compile(
 )
 # 音效标签后常带内容：【音效：玻璃碎裂】。与 SUBTITLE_RE 同样收全半角冒号。
 SFX_MARK_RE = re.compile(r"^(?:△\s*)?【音效(?:[：:]|】)")
-VISUAL_PREFIX_RE = re.compile(r"^△")
+VISUAL_PREFIX_RE = re.compile(r"^[△▲]")
 BRACKET_LINE_RE = re.compile(r"^【([^】]*)】$")
 # 剧本里的台词行（`角色名：台词`），与 _shared_patterns.DIALOGUE_RE（提示词里的
 # `{}` 台词真值锁）语义完全不同，故不同名，避免被误当成同一判据。
 # 场次元信息行（人物表/场景/时间），形式上像台词行但不是台词。
 META_LINE_RE = re.compile(r"^(?:人物|角色|场景|地点|时间|时间地点|服装|道具)\s*[：:]")
+BRACKET_CAST_META_RE = re.compile(
+    r"^【(?:出场人物|出场角色|人物|角色)\s*[：:][^】]*】$"
+)
 SCRIPT_DIALOGUE_LINE_RE = re.compile(
     r"^[^△【\s][^：:]{0,12}(?:OS|VO|OV)?(?:（[^）]*）)?[：:]"
 )
@@ -69,16 +75,24 @@ def parse_episode_number(text: str) -> int | None:
 
 def docx_paragraphs(path: Path) -> list[str]:
     with zipfile.ZipFile(path) as archive:
-        xml = archive.read("word/document.xml").decode("utf-8")
-    paragraphs = []
-    for block in re.findall(r"<w:p[ >].*?</w:p>", xml, re.S):
-        text = "".join(re.findall(r"<w:t[^>]*>(.*?)</w:t>", block, re.S))
-        text = re.sub(r"<[^>]+>", "", text)
-        text = (
-            text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
-        ).strip()
-        if text:
-            paragraphs.append(text)
+        root = ET.fromstring(archive.read("word/document.xml"))
+    word = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    paragraphs: list[str] = []
+    for block in root.iter(f"{word}p"):
+        logical_lines: list[str] = []
+        fragments: list[str] = []
+        for element in block.iter():
+            if element.tag == f"{word}t":
+                fragments.append(element.text or "")
+            elif element.tag in (f"{word}br", f"{word}cr"):
+                logical_lines.append("".join(fragments))
+                fragments = []
+        logical_lines.append("".join(fragments))
+        for logical_line in logical_lines:
+            for text in re.split(r"[\u2028\u2029]", logical_line):
+                text = text.strip()
+                if text:
+                    paragraphs.append(text)
     return paragraphs
 
 
@@ -130,6 +144,7 @@ def extract(
     units: list[dict[str, object]] = []
     current_episode: int | None = None
     current_scene = ""
+    awaiting_first_scene = False
     for text in paragraphs:
         structural_text = normalize_markdown_structure(text)
         episode_match = EPISODE_RE.match(structural_text)
@@ -139,14 +154,23 @@ def extract(
                 continue
             current_episode = parsed
             current_scene = ""
+            awaiting_first_scene = True
             continue
         scene_match = SCENE_RE.match(structural_text)
         if scene_match:
+            scene_episode = int(scene_match.group(1))
+            if awaiting_first_scene and current_episode != scene_episode:
+                current_episode = scene_episode
             current_scene = structural_text
+            awaiting_first_scene = False
             continue
+        awaiting_first_scene = False
         if episode is not None and current_episode != episode:
             continue
-        if META_LINE_RE.match(structural_text):
+        if (
+            META_LINE_RE.match(structural_text)
+            or BRACKET_CAST_META_RE.match(structural_text)
+        ):
             continue
         if SCRIPT_DIALOGUE_LINE_RE.match(structural_text):
             # 台词行同样入库（kind=dialogue），供语音对账对源；
@@ -219,7 +243,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         paragraphs = read_paragraphs(args.script)
-    except (OSError, KeyError, zipfile.BadZipFile, UnicodeError) as exc:
+    except (OSError, KeyError, zipfile.BadZipFile, UnicodeError, ET.ParseError) as exc:
         print(f"ERROR: 无法读取剧本：{exc}", file=sys.stderr)
         return 1
     kinds = {

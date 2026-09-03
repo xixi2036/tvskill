@@ -28,16 +28,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 STEPS = [
     {
-        "id": "intake",
-        "title": "任务前置决策摸底",
-        "requires": [],
-        "gate": "产出 <集号>-任务前置决策.json，必填项非空（媒介/范围/资产现状/画布操作/音色状态；"
-                "媒介=3D CG 时另需 3D子风格）",
-    },
-    {
         "id": "script_units",
         "title": "抽取原剧本画面单元",
-        "requires": ["intake"],
+        "requires": [],
         "gate": "抽取器跑通且单元数大于 0，产出 <集号>-画面单元.json",
     },
     {
@@ -50,7 +43,7 @@ STEPS = [
         "id": "assets",
         "title": "资产生产与验收",
         "requires": ["entities"],
-        "gate": "资产清单每一行都写了形态，含精确文字的道具必须标注定版道具图",
+        "gate": "资产清单每一行都写了形态，公共素材中的图片均已脱离候选/待生成/待确认状态",
     },
     {
         "id": "segments",
@@ -98,6 +91,7 @@ CONTENT_SENSITIVE = (
     "entities", "assets", "segments", "coverage",
     "validate", "review", "canvas", "generate",
 )
+CONTRACT_SENSITIVE = ("validate", "review", "canvas", "generate")
 MANUAL_STEPS = ("review", "canvas", "generate")
 
 
@@ -109,19 +103,10 @@ def delivery_path(episode: str, directory: Path) -> Path:
     return directory / f"{episode}-LibTV视频节点提示词.md"
 
 
-def intake_path(episode: str, directory: Path) -> Path:
-    return directory / f"{episode}-任务前置决策.json"
-
-
-# intake 步的必填决策字段：机器只验"填了没填"，不验"填得对不对"——语义正确性
-# 和 review/canvas/generate 一样只能由人/LLM 负责，机器只保证它没被跳过。
-INTAKE_REQUIRED_FIELDS = ("媒介", "范围", "资产现状", "画布操作", "音色状态")
-
-
 def load_state(episode: str, directory: Path) -> dict:
     path = state_path(episode, directory)
     if not path.exists():
-        return {"episode": episode, "steps": {}, "deliveryHash": ""}
+        return {"episode": episode, "steps": {}, "deliveryHash": "", "contractHash": ""}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -130,6 +115,7 @@ def load_state(episode: str, directory: Path) -> dict:
         raise ValueError("状态文件顶层必须是 object")
     value.setdefault("steps", {})
     value.setdefault("deliveryHash", "")
+    value.setdefault("contractHash", "")
     return value
 
 
@@ -146,18 +132,40 @@ def file_hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def validation_contract_hash() -> str:
+    digest = hashlib.sha256()
+    for name in (
+        "validate_delivery_md.py",
+        "_shared_patterns.py",
+        "_shot_budget.py",
+        "_fast_drama_contract.py",
+    ):
+        path = SCRIPT_DIR / name
+        digest.update(name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def invalidate_stale(state: dict, episode: str, directory: Path) -> list[str]:
     """交付 Markdown 变了就作废校验类步骤——防止拿旧结论盖新内容。"""
     current = file_hash(delivery_path(episode, directory))
-    if not current or current == state.get("deliveryHash"):
-        return []
-    dropped = [
-        step_id for step_id in CONTENT_SENSITIVE if state["steps"].get(step_id) == "done"
-    ]
+    dropped: set[str] = set()
+    if current and current != state.get("deliveryHash"):
+        dropped.update(
+            step_id for step_id in CONTENT_SENSITIVE
+            if state["steps"].get(step_id) == "done"
+        )
+        state["deliveryHash"] = current
+    contract = validation_contract_hash()
+    if contract != state.get("contractHash"):
+        dropped.update(
+            step_id for step_id in CONTRACT_SENSITIVE
+            if state["steps"].get(step_id) == "done"
+        )
+        state["contractHash"] = contract
     for step_id in dropped:
         state["steps"][step_id] = "pending"
-    state["deliveryHash"] = current
-    return dropped
+    return [step_id for step_id in STEP_IDS if step_id in dropped]
 
 
 def section(text: str, heading: str) -> str:
@@ -193,34 +201,10 @@ def check_step(
     directory: Path,
     script: Path | None,
     episode_no: int | None,
+    manual_confirmed: bool = False,
 ) -> tuple[bool, str]:
     delivery = delivery_path(episode, directory)
     units_file = directory / f"{episode}-画面单元.json"
-
-    if step_id == "intake":
-        # ★grilling 前置问答步(2026-08-01 加)：把媒介/范围/资产现状/画布操作/音色状态
-        # 这些原本散落在 1b/8/音色关联等各步才会被动问到的决策，前置到开工前一次问清楚。
-        # 机器只验"决策文件存在且必填项非空"，不代替 LLM 判断决策内容是否合理——
-        # 逐题怎么问、按 grilling 方法论一次只问一题、能从本地资料查到的先查不问，
-        # 写在 SKILL.md"开始前"一节，不写在这里（这里只是机器闸，不是问答脚本）。
-        path = intake_path(episode, directory)
-        if not path.exists():
-            return False, (
-                f"缺 {path.name}：先按 SKILL.md「开始前」一节逐题问清楚任务前置决策，"
-                "再把答案写成这个 JSON 文件"
-            )
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            return False, f"{path.name} 不是合法 JSON：{exc}"
-        if not isinstance(data, dict):
-            return False, f"{path.name} 顶层必须是 object"
-        missing = [f for f in INTAKE_REQUIRED_FIELDS if not str(data.get(f) or "").strip()]
-        if data.get("媒介") == "3D CG" and not str(data.get("3D子风格") or "").strip():
-            missing.append("3D子风格（媒介选了 3D CG 就必须填）")
-        if missing:
-            return False, f"{path.name} 缺必填项：{missing}"
-        return True, f"任务前置决策已齐全：{ {k: data.get(k) for k in INTAKE_REQUIRED_FIELDS} }"
 
     if step_id == "script_units":
         if not script:
@@ -262,6 +246,29 @@ def check_step(
         blank = [row[1].strip() for row in rows if not row[2].strip()]
         if blank:
             return False, f"这些资产没有写形态：{blank}"
+        public_assets = section(text, "## 公共素材清单")
+        if not public_assets.strip():
+            return False, "交付 Markdown 缺少公共素材清单，无法证明生成资产已经验收"
+        public_rows = re.findall(
+            r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|$",
+            public_assets,
+            re.M,
+        )
+        pending_images = [
+            name.strip()
+            for name, media_type, usage in public_rows
+            if name.strip() not in {"素材", "---"}
+            and "图片" in media_type
+            and re.search(
+                r"候选|待生成|待确认|待验收|未验收|待返工",
+                f"{name} {media_type} {usage}",
+            )
+        ]
+        if pending_images:
+            return False, (
+                "这些图片仍是候选或待生成/待确认状态，不能把 assets 标为完成："
+                f"{pending_images}；逐层视觉验收并晋升 canonical 后再更新公共素材清单"
+            )
         return True, f"{len(rows)} 项资产均已写明形态"
 
     if step_id == "segments":
@@ -305,15 +312,20 @@ def check_step(
         ok, output = run_validator(delivery, script, episode_no)
         if not ok:
             return False, f"上游确定性校验已失效，先修好再推进：\n{output}"
-        if step_id in ("canvas", "generate"):
+        if step_id in ("canvas", "generate") and not manual_confirmed:
             # 此前这两步只跑一遍单集校验就返回通过，画布可以从没连过、成片可以不存在，
             # 等于闸是空转的。机器无法替用户连画布与授权生成，但可以拒绝"无凭据即通过"。
             return False, (
                 f"{step_id} 步需要真实画布/成片证据，机器无法自证：\n"
                 "  1) 先按 SKILL.md §8 跑 sync dry-run 与 audit_canvas_nodes（零硬错误）；\n"
                 "  2) generate 还需用户逐节点授权并完成十轴审计；\n"
-                "  3) 人工确认上述证据后，用 complete 显式标记，"
-                "并在交付 Markdown 里写明凭证。"
+                "  3) 人工确认上述证据并在交付 Markdown 里写明凭证后，"
+                "用 complete --manual-confirmed 显式标记。"
+            )
+        if step_id in ("canvas", "generate"):
+            return True, (
+                f"{step_id} 的机器校验有效，且调用方已通过 "
+                "--manual-confirmed 确认真实画布/成片证据"
             )
         if step_id == "review":
             # 「待二审」是为了打破"必须先自称已通过才能过机器闸"的死循环而存在的
@@ -358,11 +370,12 @@ def cmd_status(args, state: dict) -> int:
     print(f"  本步闸：{next_step['gate']}")
     if blocked:
         print(f"  ⚠ 前置未完成：{blocked}")
-    # 必须带上用户本次传的 --dir：否则照提示继续会跑到别的目录，导致状态分叉。
-    # （--dir 现为必填参数，args.dir 已是 resolve() 后的绝对路径，此处直接原样带出。）
+    # 必须带上用户本次传的 --dir：否则照提示继续会跑到 cwd，
+    # 在错误目录新建状态文件，导致状态分叉。
+    dir_flag = f" --dir {args.dir}" if str(args.dir) != "." else ""
     print(
         f"  跑闸：python3 scripts/pipeline_state.py check {args.episode} "
-        f"{next_step['id']} --dir {args.dir} --script <原剧本> --episode-no <集号数字>"
+        f"{next_step['id']}{dir_flag} --script <原剧本> --episode-no <集号数字>"
     )
     return 0
 
@@ -380,7 +393,14 @@ def cmd_check(args, state: dict, mark_done: bool) -> int:
             file=sys.stderr,
         )
         return 1
-    ok, detail = check_step(args.step, args.episode, args.dir, args.script, args.episode_no)
+    ok, detail = check_step(
+        args.step,
+        args.episode,
+        args.dir,
+        args.script,
+        args.episode_no,
+        manual_confirmed=args.manual_confirmed,
+    )
     print(detail)
     if not ok:
         state["steps"][args.step] = "failed"
@@ -390,6 +410,7 @@ def cmd_check(args, state: dict, mark_done: bool) -> int:
     if mark_done:
         state["steps"][args.step] = "done"
         state["deliveryHash"] = file_hash(delivery_path(args.episode, args.dir))
+        state["contractHash"] = validation_contract_hash()
         save_state(args.episode, args.dir, state)
         print(f"OK: {args.step} 已完成")
     else:
@@ -415,28 +436,15 @@ def main() -> int:
     parser.add_argument("command", choices=("status", "check", "complete", "reset"))
     parser.add_argument("episode", help="集号，例如 EP01")
     parser.add_argument("step", nargs="?", help="步骤 id")
-    parser.add_argument("--dir", type=Path, default=None, help="交付目录（不传则报错，不会静默用当前目录）")
+    parser.add_argument("--dir", type=Path, default=Path.cwd(), help="交付目录")
     parser.add_argument("--script", type=Path, help="原剧本 .docx/.txt/.md")
     parser.add_argument("--episode-no", type=int, help="原剧本中的集号数字")
+    parser.add_argument(
+        "--manual-confirmed",
+        action="store_true",
+        help="仅用于 canvas/generate：确认真实画布或成片审计凭证已落盘",
+    )
     args = parser.parse_args()
-    if args.dir is None:
-        # ★2026-08-01 UX修:此前默认 Path.cwd()，忘传 --dir 时会静默在当前目录（可能是
-        # 从 skill 自身源码目录里直接跑的）新建 <集号>-run_state.json，污染 skill 仓库
-        # 且不自知（实测复现过一次）。改成硬性要求显式传参，宁可多打几个字，不可静默写错地方。
-        print("ERROR: 必须显式传 --dir 指定交付目录（不会默认用当前目录，防止误写进 skill 自身仓库）", file=sys.stderr)
-        return 2
-    args.dir = args.dir.resolve()
-    if not args.dir.exists():
-        print(
-            f"ERROR: 目录不存在：{args.dir}\n"
-            f"  先创建交付目录再跑：mkdir -p {args.dir}\n"
-            f"  或检查 --dir 路径是否打错",
-            file=sys.stderr,
-        )
-        return 2
-    if not args.dir.is_dir():
-        print(f"ERROR: --dir 指向的不是目录：{args.dir}", file=sys.stderr)
-        return 2
     try:
         state = load_state(args.episode, args.dir)
         if args.command == "status":

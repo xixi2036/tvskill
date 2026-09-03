@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Create/update unrun TVMao video-generator nodes from a TVSkill Markdown delivery."""
+"""Create/update unrun TVMao video-generator nodes from a TVSkill Markdown delivery.
+
+Use ``--fresh-set`` when the user asks to rebuild the complete episode with new
+video nodes.  That mode deliberately forbids both partial selection and target
+node mappings, so an old or half-old node set cannot be mistaken for a rebuild.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shared_patterns import DIALOGUE_RE, OS_VO_RE, PLANNING_RE, VOICE_SLOT_RE  # noqa: E402
+from _fast_drama_contract import prompt_quality_messages  # noqa: E402
 
 import audit_canvas_nodes  # noqa: E402
 
@@ -28,11 +35,14 @@ MIXED_RE = re.compile(
 MIXED_BINDING_RE = re.compile(
     r"@\[(?P<label>[^\]]+)\]\s*\{\{Mixed\s+(?P<number>\d+)\}\}"
 )
-BARE_MIXED_RE = re.compile(r"(?<!\{\{)\bMixed\s+(?P<number>\d+)\b(?!\}\})")
+BARE_MIXED_RE = re.compile(
+    r"(?<!\{\{)(?<![A-Za-z0-9_@])Mixed\s+(?P<number>\d+)(?![A-Za-z0-9_])(?!\}\})"
+)
 CANVAS_MENTION_RE = re.compile(
     r"@\[(?P<kind>图片|视频|音频):(?P<node_id>[^\]\s]+)\]"
 )
 DEFAULT_MODEL_ID = "doubao-seedance-2-0-fast-260128"
+REFERENCE_LIMITS = {"总计": 12, "图片": 9, "视频": 3, "音频": 3}
 MODEL_ALIASES = {
     "Seedance 2.0 Fast VIP": DEFAULT_MODEL_ID,
     "Seedance 2.0 VIP": "doubao-seedance-2-0-260128",
@@ -82,6 +92,19 @@ def expected_node_type(media_type: str) -> str:
     ]
 
 
+def clean_frame_block_reason(
+    prompt: str, rows: list[dict[str, Any]], run_status: str
+) -> str | None:
+    has_sync_dialogue = bool(DIALOGUE_RE.search(prompt) and re.search(r"说出\s*\{", prompt))
+    has_clean_frame = any(
+        re.search(r"首帧|续接帧|验收末帧|稳定末帧", f"{row['asset']} {row['semantic']}")
+        for row in rows
+    )
+    if has_sync_dialogue and run_status == "可运行" and not has_clean_frame:
+        return "可运行同步对白缺少干净首帧或已验收续接帧；预览标签不能绕过"
+    return None
+
+
 def parse_markdown(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
     text = path.read_text(encoding="utf-8")
     headings = list(SEGMENT_RE.finditer(text))
@@ -120,6 +143,9 @@ def parse_markdown(path: Path) -> tuple[dict[str, str], list[dict[str, Any]]]:
             blocked.append(f"规划资产禁止进入输入边：{planning_rows}")
         if has_text_voice and (sound != "开启" or not audio_rows):
             blocked.append("含台词/OS/VO/旁白，必须声明声音开启并绑定独立音色 audio-input")
+        frame_block = clean_frame_block_reason(prompt, rows, run_status)
+        if frame_block:
+            blocked.append(frame_block)
         segments.append(
             {
                 "number": match.group(1), "title": match.group(2).strip(),
@@ -185,6 +211,35 @@ def compile_prompt(segment: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
     return prompt, compiled_rows
 
 
+def validate_reference_budget(
+    segment_number: str,
+    segment_prompt: str,
+    rows: list[dict[str, Any]],
+    duration: int,
+) -> None:
+    counts = {kind: sum(row["kind"] == kind for row in rows) for kind in ("图片", "视频", "音频")}
+    counts["总计"] = sum(counts.values())
+    over = [f"{kind}={counts[kind]}>{limit}" for kind, limit in REFERENCE_LIMITS.items() if counts[kind] > limit]
+    if over:
+        raise ValueError(
+            f"V{segment_number} 超过 Seedance 2.0 Rule of 12：{', '.join(over)}；"
+            "请拆段或移除非核心道具/背景资产"
+        )
+    if "主体标签锁定：" not in segment_prompt:
+        raise ValueError(f"V{segment_number} 缺少稳定主体标签锁定行")
+    quality_errors, _quality_warnings = prompt_quality_messages(
+        segment_prompt,
+        duration,
+        has_character_references=any(
+            str(row.get("asset") or "").startswith("独立身份图-") for row in rows
+        ),
+    )
+    if quality_errors:
+        raise ValueError(
+            f"V{segment_number} Seedance 快节奏提示词门禁失败：{'；'.join(quality_errors)}"
+        )
+
+
 def compile_canvas_prompt(prompt: str, rows: list[dict[str, Any]]) -> str:
     """Replace model-facing 图片N text with the canvas editor's node-id mention token."""
     result = prompt
@@ -194,8 +249,12 @@ def compile_canvas_prompt(prompt: str, rows: list[dict[str, Any]]) -> str:
             raise ValueError(f"素材 {row['asset']} 缺少 TVMao 节点 ID，无法建立画布引用")
         numbered = f"{row['kind']}{row['kindIndex']}"
         token = f"@[{row['kind']}:{node_id}]"
+        # Python's ``\w`` includes CJK characters, so a natural phrase such as
+        # “图片5与图片6” used to make the second reference look embedded in a
+        # word. Only ASCII identifier characters and an existing mention sigil
+        # should block replacement here.
         result, count = re.subn(
-            rf"(?<![\w@]){re.escape(numbered)}(?=（)", token, result
+            rf"(?<![A-Za-z0-9_@]){re.escape(numbered)}(?=（)", token, result
         )
         if count == 0:
             raise ValueError(f"素材 {row['asset']} 没有可转换的 {numbered} 引用")
@@ -232,6 +291,27 @@ def parse_mapping(values: list[str], label: str) -> dict[str, str]:
             raise ValueError(f"{label} 映射不能为空：{value}")
         result[key] = node
     return result
+
+
+def resolve_sync_mode(
+    *, fresh_set: bool, only: str | None, node_mapping: dict[str, str]
+) -> str:
+    """Resolve the write contract before any TVMao mutation is allowed."""
+    if fresh_set and only:
+        raise ValueError(
+            "--fresh-set 表示整集全量新建，禁止同时使用 --only；"
+            "不得只挑选被认为‘受影响’的段"
+        )
+    if fresh_set and node_mapping:
+        raise ValueError(
+            "--fresh-set 禁止使用 --node；旧视频节点必须冻结保留，"
+            "V01–VNN 每段都创建新的 video-generator"
+        )
+    if fresh_set:
+        return "fresh-set"
+    if node_mapping:
+        return "update-idle"
+    return "create-selected" if only else "create-all"
 
 
 def mapping_lookup(mapping: dict[str, str], row: dict[str, Any]) -> str | None:
@@ -349,6 +429,52 @@ def build_rewire_command(
     return command
 
 
+def plan_create_positions(
+    existing_nodes: list[dict[str, Any]], count: int, *, columns: int = 7
+) -> list[dict[str, int]]:
+    """Place new generators in a visible, non-overlapping grid below the canvas."""
+    if count <= 0:
+        return []
+    positions: list[tuple[float, float, float, float]] = []
+    for item in existing_nodes:
+        position = item.get("position") if isinstance(item.get("position"), dict) else {}
+        size = item.get("size") if isinstance(item.get("size"), dict) else {}
+        x = float(position.get("x") or 0)
+        y = float(position.get("y") or 0)
+        width = float(size.get("width") or 400)
+        height = float(size.get("height") or 500)
+        positions.append((x, y, width, height))
+    left = min((item[0] for item in positions), default=0)
+    bottom = max((item[1] + item[3] for item in positions), default=0)
+    base_x = math.floor(left / 100) * 100
+    base_y = math.ceil((bottom + 200) / 100) * 100
+    return [
+        {
+            "x": int(base_x + (index % columns) * 480),
+            "y": int(base_y + (index // columns) * 600),
+        }
+        for index in range(count)
+    ]
+
+
+def build_create_command(
+    tvmao: str, project: int, model_id: str, segment: dict[str, Any],
+    desired_ids: list[str], position: dict[str, int],
+) -> list[str]:
+    command = [
+        tvmao, "node", "create", "--project", str(project),
+        "--type", "video-generator", "--model", model_id,
+        "--param-string", f"prompt={segment['compiledPrompt']}",
+        "--param-string", f"ratio={segment['params']['ratio']}",
+        "--param-string", f"resolution={segment['params']['resolution']}",
+        "--param", f"duration={segment['params']['duration']}",
+        "--x", str(position["x"]), "--y", str(position["y"]),
+    ]
+    for node in desired_ids:
+        command += ["--left", node]
+    return command
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("markdown", type=Path)
@@ -356,6 +482,10 @@ def main() -> int:
     parser.add_argument("--only", help="仅同步指定段号，逗号分隔，例如 1,2,15")
     parser.add_argument("--asset", action="append", default=[], help="素材名或语义=输入节点ID，可重复")
     parser.add_argument("--node", action="append", default=[], help="现有段号=video-generator节点ID，可重复")
+    parser.add_argument(
+        "--fresh-set", action="store_true",
+        help="整集重建：禁止 --only/--node，并为 Markdown 中每一段创建全新视频节点",
+    )
     parser.add_argument("--model", help="覆盖 Markdown 模型；建议使用稳定 modelId")
     parser.add_argument("--tvmao")
     parser.add_argument("--apply", action="store_true")
@@ -364,6 +494,14 @@ def main() -> int:
     tvmao = args.tvmao or shutil.which("tvmao") or str(Path.home() / ".tvmao" / "tvmao")
     try:
         defaults, segments = parse_markdown(args.markdown)
+        all_segment_numbers = [segment["number"] for segment in segments]
+        node_mapping_raw = parse_mapping(args.node, "--node")
+        node_mapping = {
+            f"{int(key.removeprefix('V')):02d}": value for key, value in node_mapping_raw.items()
+        }
+        sync_mode = resolve_sync_mode(
+            fresh_set=args.fresh_set, only=args.only, node_mapping=node_mapping
+        )
         if args.only:
             selected = {f"{int(value):02d}" for value in args.only.split(",") if value.strip()}
             segments = [segment for segment in segments if segment["number"] in selected]
@@ -379,10 +517,6 @@ def main() -> int:
             raise ValueError(detail + hint)
 
         asset_mapping = parse_mapping(args.asset, "--asset")
-        node_mapping_raw = parse_mapping(args.node, "--node")
-        node_mapping = {
-            f"{int(key.removeprefix('V')):02d}": value for key, value in node_mapping_raw.items()
-        }
         model_id = resolve_model(defaults, args.model)
         base_params = {
             "ratio": defaults["ratio"], "resolution": defaults["resolution"],
@@ -393,6 +527,9 @@ def main() -> int:
         missing_assets: set[str] = set()
         for segment in segments:
             prompt, rows = compile_prompt(segment)
+            validate_reference_budget(
+                segment["number"], segment["prompt"], rows, segment["duration"]
+            )
             for row in rows:
                 row["nodeId"] = mapping_lookup(asset_mapping, row)
                 if not row["nodeId"]:
@@ -429,6 +566,9 @@ def main() -> int:
         if not args.apply:
             print(compact({
                 "mode": "dry-run", "backend": "tvmao", "project": args.project,
+                "syncMode": sync_mode,
+                "completeEpisode": sync_mode == "fresh-set",
+                "sourceSegments": [f"V{number}" for number in all_segment_numbers],
                 "modelId": model_id, "missingAssets": sorted(missing_assets), "nodes": plan,
             }))
             return 0
@@ -442,6 +582,16 @@ def main() -> int:
         if not isinstance(listed, list):
             raise ValueError("tvmao node list 顶层必须是数组")
         by_id = {object_id(item): item for item in listed if isinstance(item, dict) and object_id(item)}
+        preexisting_ids = set(by_id)
+        create_segments = [
+            segment for segment in compiled if segment["number"] not in node_mapping
+        ]
+        position_by_segment = {
+            segment["number"]: position
+            for segment, position in zip(
+                create_segments, plan_create_positions(listed, len(create_segments))
+            )
+        }
         for segment in compiled:
             for row in segment["inputs"]:
                 item = by_id.get(row["nodeId"])
@@ -459,6 +609,7 @@ def main() -> int:
         }
 
         results: list[dict[str, Any]] = []
+        created_ids: set[str] = set()
         for segment in compiled:
             desired_ids = [row["nodeId"] for row in segment["inputs"]]
             existing_id = node_mapping.get(segment["number"])
@@ -501,20 +652,20 @@ def main() -> int:
                 node_id = existing_id
                 action = "updated"
             else:
-                command = [
-                    tvmao, "node", "create", "--project", str(args.project),
-                    "--type", "video-generator", "--model", model_id,
-                    "--param-string", f"prompt={segment['compiledPrompt']}",
-                    "--param-string", f"ratio={segment['params']['ratio']}",
-                    "--param-string", f"resolution={segment['params']['resolution']}",
-                    "--param", f"duration={segment['params']['duration']}",
-                ]
-                for node in desired_ids:
-                    command += ["--left", node]
+                expected_position = position_by_segment[segment["number"]]
+                command = build_create_command(
+                    tvmao, args.project, model_id, segment, desired_ids,
+                    expected_position,
+                )
                 response = run(command, cwd=cwd)
                 node_id = response_node_id(response)
                 if not node_id:
                     raise ValueError(f"V{segment['number']} 无法从 node create 响应解析节点 ID")
+                if node_id in preexisting_ids or node_id in created_ids:
+                    raise ValueError(
+                        f"V{segment['number']} node create 未返回全新唯一节点 ID：{node_id}"
+                    )
+                created_ids.add(node_id)
                 action = "created"
 
             detail = run([tvmao, "node", "get", node_id, "--project", str(args.project)], cwd=cwd)
@@ -526,15 +677,34 @@ def main() -> int:
             actual_ids = [edge_from(edge) for edge in edges if isinstance(edge, dict)]
             if actual_ids != desired_ids:
                 raise ValueError(f"V{segment['number']} 入边回读不一致：{actual_ids} / {desired_ids}")
+            actual_detail = detail.get("node") if isinstance(detail.get("node"), dict) else detail
+            if action == "created":
+                actual_position = actual_detail.get("position")
+                if actual_position != position_by_segment[segment["number"]]:
+                    raise ValueError(
+                        f"V{segment['number']} 新节点布局回读不一致："
+                        f"{actual_position} / {position_by_segment[segment['number']]}"
+                    )
             audit_detail = build_detail_for_audit(detail, segment["inputs"], compliance)
             errors, warnings, summary = audit_canvas_nodes.audit_node(audit_detail)
             if errors:
                 raise ValueError(f"V{segment['number']} TVMao 回读门禁失败：{errors}")
             results.append({
                 "segment": f"V{segment['number']}", "nodeId": node_id,
-                "action": action, "fingerprint": summary["fingerprint"], "warnings": warnings,
+                "action": action, "position": actual_detail.get("position"),
+                "fingerprint": summary["fingerprint"], "warnings": warnings,
             })
-        print(compact({"mode": "applied", "backend": "tvmao", "nodes": results}))
+        if sync_mode == "fresh-set":
+            expected = [f"V{number}" for number in all_segment_numbers]
+            actual = [row["segment"] for row in results]
+            if actual != expected or any(row["action"] != "created" for row in results):
+                raise ValueError(
+                    f"整集全新节点集合不完整：expected={expected} actual={actual}"
+                )
+        print(compact({
+            "mode": "applied", "backend": "tvmao", "syncMode": sync_mode,
+            "completeEpisode": sync_mode == "fresh-set", "nodes": results,
+        }))
         return 0
     except (OSError, UnicodeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -1,4 +1,6 @@
 import importlib.util
+import struct
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -61,7 +63,43 @@ class AuditImageAssetNodeTests(unittest.TestCase):
                     "16:9横版万物生标准色卡参考图，纯白背景。"
                     "13个等大矩形色块在同一行从左到右单排排列，每个色块下方以小号黑色等宽字体标注HEX。"
                     f"从左到右：{colors}。"
+                    "标题文字置于顶部中央：WANWU SHENG TEST COLOR REFERENCE。"
                     "所有色块均为纯平色、锐利硬边，无渐变、无纹理、无噪点、无阴影。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertEqual(errors, [])
+
+    def test_color_card_prompt_is_audited_without_name_metadata(self):
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "prompt": (
+                    "A clean color palette swatch reference card design. "
+                    "13 evenly-sized swatches in a single row."
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertTrue(any("16:9" in item for item in errors))
+        self.assertTrue(any("COLOR REFERENCE" in item for item in errors))
+
+    def test_color_card_accepts_wanwusheng_english_sharp_clean_edges(self):
+        colors = " ".join(f"#{index:06X}" for index in range(1, 14))
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "prompt": (
+                    "16:9 horizontal layout. White background. "
+                    "13 evenly-sized swatches in a single row. "
+                    "Below each swatch, black monospace HEX labels. "
+                    f"{colors}. "
+                    "sharp clean edges, pure flat color, no gradient, no texture, "
+                    "no noise, no shadows. Title text at the top center: "
+                    "TEST COLOR REFERENCE."
                 ),
             },
         }
@@ -82,48 +120,10 @@ class AuditImageAssetNodeTests(unittest.TestCase):
         }
         errors, _ = MOD.audit(target, [], {}, [], True)
         self.assertTrue(any("16:9" in item for item in errors))
-        self.assertTrue(any("13/22/24" in item for item in errors))
+        self.assertTrue(any("13 个" in item for item in errors))
         self.assertTrue(any("9:16" in item for item in errors))
         self.assertTrue(any("HEX" in item for item in errors))
         self.assertTrue(any("无文字/无标签" in item for item in errors))
-
-    def test_accepts_22_color_wanwu_wenxin_extension(self):
-        """问心复杂场景色卡:22色档,版式约束不变,只放开数量(2026-08-01补)。"""
-        colors = "、".join(f"颜色{i} #{i:06X}（用途{i}）" for i in range(1, 23))
-        target = {
-            "type": "image-generator",
-            "status": "idle",
-            "params": {
-                "name": "EP01-A09-色卡-废墟战场",
-                "prompt": (
-                    "16:9横版万物生标准色卡参考图，纯白背景。"
-                    "22个等大矩形色块在同一行从左到右单排排列，每个色块下方以小号黑色等宽字体标注HEX。"
-                    f"从左到右：{colors}。"
-                    "所有色块均为纯平色、锐利硬边，无渐变、无纹理、无噪点、无阴影。"
-                ),
-            },
-        }
-        errors, _ = MOD.audit(target, [], {}, [], True)
-        self.assertEqual(errors, [])
-
-    def test_rejects_declared_count_mismatching_actual_hex_count(self):
-        """文字声明22色但实际只列13个HEX——数量对不上必须拦。"""
-        colors = "、".join(f"颜色{i} #{i:06X}（用途{i}）" for i in range(1, 14))
-        target = {
-            "type": "image-generator",
-            "status": "idle",
-            "params": {
-                "name": "EP01-A09-色卡-废墟战场",
-                "prompt": (
-                    "16:9横版万物生标准色卡参考图，纯白背景。"
-                    "22个等大矩形色块在同一行从左到右单排排列，每个色块下方以小号黑色等宽字体标注HEX。"
-                    f"从左到右：{colors}。"
-                    "所有色块均为纯平色、锐利硬边，无渐变、无纹理、无噪点、无阴影。"
-                ),
-            },
-        }
-        errors, _ = MOD.audit(target, [], {}, [], True)
-        self.assertTrue(any("声明色块数(22)与实际列出的 HEX 数(13)不一致" in item for item in errors))
 
     def test_accepts_standard_3d_character_reference_board(self):
         target = {
@@ -131,8 +131,9 @@ class AuditImageAssetNodeTests(unittest.TestCase):
             "status": "idle",
             "params": {
                 "name": "EP01-C01-角色-顾续尘-标准参考图-v01",
+                "resolution": "2048x1152",
                 "prompt": (
-                    "影视级国漫风格化3D官方角色设定展示板，纯白无缝背景。"
+                    "16:9横版影视级国漫风格化3D官方角色设定展示板，纯白无缝背景。"
                     "左侧约三分之一为完整正面头肩肖像，其余区域并排展示全身正面、"
                     "全身侧面、全身背面三视图。人物保持中性站姿与中性表情。"
                     "无标题、无文字、无水印，不出现剧情场景或道具。"
@@ -141,6 +142,103 @@ class AuditImageAssetNodeTests(unittest.TestCase):
         }
         errors, _ = MOD.audit(target, [], {}, [], True)
         self.assertEqual(errors, [])
+
+    def test_rejects_portrait_character_board_without_name_metadata(self):
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "resolution": "1152x2048",
+                "prompt": (
+                    "9:16竖版高端日韩风格化3D官方角色设定展示板，纯白无缝背景。"
+                    "左侧约三分之一为完整正面头肩肖像，其余区域并排展示全身正面、"
+                    "全身侧面、全身背面三视图。人物保持中性站姿与中性表情。"
+                    "无标题、无文字、无水印，不出现剧情场景或道具。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertTrue(any("16:9" in item for item in errors))
+        self.assertTrue(any("不得继承 9:16" in item for item in errors))
+        self.assertTrue(any("分辨率必须为横向 16:9" in item for item in errors))
+
+    def test_rejects_landscape_prompt_with_portrait_node_resolution(self):
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "resolution": "1152x2048",
+                "prompt": (
+                    "16:9横版高端日韩风格化3D官方角色设定展示板，纯白无缝背景。"
+                    "左侧约三分之一为完整正面头肩肖像，其余区域并排展示全身正面、"
+                    "全身侧面、全身背面三视图。人物保持中性站姿与中性表情。"
+                    "无标题、无文字、无水印，不出现剧情场景或道具。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertTrue(any("分辨率必须为横向 16:9" in item for item in errors))
+
+    def test_ratio_does_not_hide_conflicting_portrait_resolution(self):
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "ratio": "16:9",
+                "resolution": "1152x2048",
+                "prompt": (
+                    "16:9横版高端日韩风格化3D标准人物四视图，纯白无缝背景。"
+                    "包含正面头肩肖像、全身正面、全身侧面、全身背面。"
+                    "人物保持中性站姿与中性表情，无文字、无水印。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertTrue(any("分辨率必须为横向 16:9" in item for item in errors))
+
+    def test_generic_standard_character_multiview_is_audited(self):
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "resolution": "1152x2048",
+                "prompt": (
+                    "9:16竖版高端日韩风格化3D标准人物四视图，纯白无缝背景。"
+                    "包含正面头肩肖像、全身正面、全身侧面、全身背面。"
+                    "人物保持中性站姿与中性表情，无文字、无水印。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertTrue(any("不得继承 9:16" in item for item in errors))
+
+    def test_post_run_output_file_must_be_landscape_16_9(self):
+        with tempfile.TemporaryDirectory() as directory:
+            portrait = Path(directory) / "portrait.png"
+            portrait.write_bytes(
+                b"\x89PNG\r\n\x1a\n"
+                + struct.pack(">I", 13)
+                + b"IHDR"
+                + struct.pack(">II", 1152, 2048)
+            )
+            landscape = Path(directory) / "landscape.png"
+            landscape.write_bytes(
+                b"\x89PNG\r\n\x1a\n"
+                + struct.pack(">I", 13)
+                + b"IHDR"
+                + struct.pack(">II", 2048, 1152)
+            )
+            self.assertTrue(MOD.audit_character_output_file(portrait))
+            self.assertEqual(MOD.audit_character_output_file(landscape), [])
+
+    def test_succeeded_character_board_requires_downloaded_output_file(self):
+        target = {"status": "succeeded"}
+        errors = MOD.audit_character_output_requirement(target, True, None)
+        self.assertTrue(any("缺少 --output-file" in item for item in errors))
+        self.assertEqual(
+            MOD.audit_character_output_requirement({"status": "idle"}, True, None),
+            [],
+        )
 
     def test_rejects_character_still_as_standard_reference(self):
         target = {
@@ -157,6 +255,56 @@ class AuditImageAssetNodeTests(unittest.TestCase):
         errors, _ = MOD.audit(target, [], {}, [], True)
         self.assertTrue(any("角色设定展示板" in item for item in errors))
         self.assertTrue(any("剧照/表演锚语义" in item for item in errors))
+
+    def test_negated_or_future_still_markers_do_not_block_reference_board(self):
+        target = {
+            "type": "image-generator",
+            "status": "idle",
+            "params": {
+                "resolution": "2048x1152",
+                "prompt": (
+                    "16:9横版高端日韩风格化3D官方角色设定展示板，纯白无缝背景。"
+                    "包含正面头肩肖像、全身正面、全身侧面、全身背面。"
+                    "人物保持中性站姿与中性表情，无文字、无水印。"
+                    "哭泣与红肿双眼均属后续状态，本板不生成。"
+                    "不得出现报纸、沙发、场景或道具。"
+                ),
+            },
+        }
+        errors, _ = MOD.audit(target, [], {}, [], True)
+        self.assertEqual(errors, [])
+
+    def test_unrelated_negation_does_not_hide_positive_still_markers(self):
+        base = (
+            "16:9横版高端日韩风格化3D官方角色设定展示板，纯白无缝背景。"
+            "包含正面头肩肖像、全身正面、全身侧面、全身背面。"
+            "人物保持中性站姿与中性表情，无文字、无水印。"
+        )
+        for sentence in (
+            "人物端坐沙发未起身。",
+            "人物端坐沙发但不得出现道具。",
+            "人物不得哭泣但端坐沙发。",
+            "人物无道具、端坐沙发。",
+        ):
+            with self.subTest(sentence=sentence):
+                target = {
+                    "type": "image-generator",
+                    "status": "idle",
+                    "params": {
+                        "resolution": "2048x1152",
+                        "prompt": base + sentence,
+                    },
+                }
+                errors, _ = MOD.audit(target, [], {}, [], True)
+                self.assertTrue(any("剧照/表演锚语义" in item for item in errors))
+
+    def test_distributed_action_negation_still_exempts_the_target_marker(self):
+        for sentence in (
+            "人物不得扶门框、端坐沙发。",
+            "不得出现报纸、沙发、场景。",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertEqual(MOD.positive_still_markers(sentence), [])
 
     def test_performance_anchor_is_not_forced_into_reference_board_layout(self):
         target = {

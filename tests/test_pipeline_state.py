@@ -105,6 +105,41 @@ class PipelineStateTests(unittest.TestCase):
         ok, detail = self.check("entities")
         self.assertTrue(ok, detail)
 
+    def test_assets_gate_rejects_pending_candidate_images(self):
+        self.delivery.write_text(
+            ASSETS_FULL
+            + """
+## 公共素材清单
+
+| 素材 | 类型 | 用途 |
+|---|---|---|
+| 单知影候选身份图-v2 | 图片（待生成确认） | 锁人物身份 |
+| 色卡-系统空间 | 图片 | 已验收色彩锚点 |
+""",
+            encoding="utf-8",
+        )
+        ok, detail = self.check("assets")
+        self.assertFalse(ok)
+        self.assertIn("不能把 assets 标为完成", detail)
+        self.assertIn("单知影候选身份图-v2", detail)
+
+    def test_assets_gate_accepts_only_confirmed_images(self):
+        self.delivery.write_text(
+            ASSETS_FULL
+            + """
+## 公共素材清单
+
+| 素材 | 类型 | 用途 |
+|---|---|---|
+| 单知影-CANON-v3 | 图片 | 已验收身份锚点 |
+| 色卡-系统空间-CANON-v3 | 图片 | 已验收色彩锚点 |
+| 单知影-音色占位槽（待人工上传） | 音频（待上传） | 不阻塞图片资产阶段 |
+""",
+            encoding="utf-8",
+        )
+        ok, detail = self.check("assets")
+        self.assertTrue(ok, detail)
+
     def test_coverage_refuses_without_script(self):
         self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
         ok, detail = self.check("coverage", None)
@@ -119,83 +154,13 @@ class PipelineStateTests(unittest.TestCase):
         state["steps"]["coverage"] = "done"
         self.assertEqual(MODULE.blocking_prerequisites("validate", state), [])
 
-    def test_script_units_now_requires_intake(self):
-        """★2026-08-01 加:grilling 前置问答步必须挡在 script_units 之前，
-        不能像之前那样一进门就抽画面单元——媒介/范围这些决策必须先问清楚。"""
-        state = {"episode": "EP01", "steps": {}, "deliveryHash": ""}
-        self.assertEqual(
-            MODULE.blocking_prerequisites("script_units", state), ["intake"]
-        )
-        state["steps"]["intake"] = "done"
-        self.assertEqual(MODULE.blocking_prerequisites("script_units", state), [])
-
-    def test_intake_gate_rejects_missing_file(self):
-        ok, detail = self.check("intake")
-        self.assertFalse(ok)
-        self.assertIn("任务前置决策.json", detail)
-
-    def test_intake_gate_rejects_missing_required_fields(self):
-        intake_file = self.dir / "EP01-任务前置决策.json"
-        intake_file.write_text(
-            json.dumps({"媒介": "真人实拍", "范围": "单集"}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        ok, detail = self.check("intake")
-        self.assertFalse(ok)
-        self.assertIn("资产现状", detail)
-        self.assertIn("画布操作", detail)
-        self.assertIn("音色状态", detail)
-
-    def test_intake_gate_requires_3d_substyle_when_medium_is_3d_cg(self):
-        intake_file = self.dir / "EP01-任务前置决策.json"
-        intake_file.write_text(
-            json.dumps(
-                {
-                    "媒介": "3D CG",
-                    "范围": "单集",
-                    "资产现状": "需要从零生产",
-                    "画布操作": "仅生成Markdown",
-                    "音色状态": "需要占位等待人工上传",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        ok, detail = self.check("intake")
-        self.assertFalse(ok)
-        self.assertIn("3D子风格", detail)
-
-    def test_intake_gate_accepts_complete_decisions(self):
-        intake_file = self.dir / "EP01-任务前置决策.json"
-        intake_file.write_text(
-            json.dumps(
-                {
-                    "媒介": "真人实拍",
-                    "范围": "单集",
-                    "资产现状": "已有可复用",
-                    "画布操作": "仅生成Markdown",
-                    "音色状态": "全部已上传",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-        ok, detail = self.check("intake")
-        self.assertTrue(ok, detail)
-
-    def test_intake_gate_rejects_malformed_json(self):
-        intake_file = self.dir / "EP01-任务前置决策.json"
-        intake_file.write_text("{不是合法json", encoding="utf-8")
-        ok, detail = self.check("intake")
-        self.assertFalse(ok)
-        self.assertIn("不是合法 JSON", detail)
-
     def test_delivery_change_invalidates_downstream_steps(self):
         self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
         state = {
             "episode": "EP01",
             "steps": {step: "done" for step in MODULE.STEP_IDS},
             "deliveryHash": MODULE.file_hash(self.delivery),
+            "contractHash": MODULE.validation_contract_hash(),
         }
         self.assertEqual(MODULE.invalidate_stale(state, "EP01", self.dir), [])
         self.delivery.write_text(ASSETS_FULL + "\n改了一个字\n", encoding="utf-8")
@@ -206,6 +171,21 @@ class PipelineStateTests(unittest.TestCase):
             self.assertEqual(state["steps"][step], "pending", step)
         # script_units 只依赖原剧本，不受交付物改动影响
         self.assertEqual(state["steps"]["script_units"], "done")
+
+    def test_validator_contract_change_invalidates_validation_and_canvas(self):
+        self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
+        state = {
+            "episode": "EP01",
+            "steps": {step: "done" for step in MODULE.STEP_IDS},
+            "deliveryHash": MODULE.file_hash(self.delivery),
+            "contractHash": "stale-contract",
+        }
+        dropped = MODULE.invalidate_stale(state, "EP01", self.dir)
+        self.assertEqual(dropped, list(MODULE.CONTRACT_SENSITIVE))
+        for step in MODULE.CONTRACT_SENSITIVE:
+            self.assertEqual(state["steps"][step], "pending")
+        for step in ("script_units", "entities", "assets", "segments", "coverage"):
+            self.assertEqual(state["steps"][step], "done")
 
 
 
@@ -232,6 +212,25 @@ class PipelineStateTests(unittest.TestCase):
                 ok, detail = MODULE.check_step(step, "EP01", self.dir, None, None)
                 self.assertFalse(ok)
                 self.assertIn("机器无法自证", detail)
+
+    def test_canvas_and_generate_accept_explicit_manual_confirmation(self):
+        template = (
+            Path(__file__).resolve().parents[1]
+            / "assets" / "libtv-video-prompts.template.md"
+        ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
+        self.delivery.write_text(template, encoding="utf-8")
+        for step in ("canvas", "generate"):
+            with self.subTest(step):
+                ok, detail = MODULE.check_step(
+                    step,
+                    "EP01",
+                    self.dir,
+                    None,
+                    None,
+                    manual_confirmed=True,
+                )
+                self.assertTrue(ok, detail)
+                self.assertIn("--manual-confirmed", detail)
 
     def test_review_step_accepts_completed_audit(self):
         template = (

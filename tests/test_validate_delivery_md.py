@@ -89,8 +89,10 @@ VALID = """# EP01｜LibTV 完成提示词
 ### LibTV 完成提示词（整块复制）
 
 ```text
+主体标签锁定：本段仅使用 <主体N>；角色名和服装状态只保留在参考语义与台词原文中。
 现代学院教室白日文戏，Kodak Vision3 35mm film grain 颗粒 + 低饱和冷调写实色调。将 @[单知影] {{Mixed 1}} 中的稳定身份特征定义为 <主体1>，该图作为 <主体1> 的视觉锚定，五官、发型与制服严格按此图渲染，不可改造；将 @[李威] {{Mixed 2}} 中的稳定身份特征定义为 <主体2>，该图作为 <主体2> 的视觉锚定，严格按此图渲染，不可改造。@[李威-逐句音频] {{Mixed 3}} 只控制 <主体2> 本句的音色与口型，不继承其它台词、情绪和背景声。参考 @[首帧-3-1-B] {{Mixed 4}} 的干净画面、人物位置和真实视线对象；将 @[场景状态-Z班-S1] {{Mixed 5}} 定义为 <场景1>，只参考空间、光线和当前人数。人物图只锁各自身份，不继承原姿势和原视线。
 
+长镜头叙事意图：用不中断的等待保持两人对峙压力。
 单一连续镜头，无剪切。中近景，稳定三分之四侧机位。【阶段1：起手】右侧 #C9D8E4 冷白窗光落在 <主体1> 的右肩，室内顶灯投出 #8A7A5E 暖色补光，两人保持既有座位。【阶段2：开口】<主体2> 听见房间安静后才开口，把视线锁在 <主体1> 的右肩背；<主体2> 严格使用 Mixed 3 的音色，自然说出 {哼，装什么装！}，一口自然说完；说完恢复鼻息，继续听着 <主体1> 的方向，右手自然留在桌沿。
 
 【声音设计】0-2秒：教室低频环境底噪与远处走廊人声；2-4秒：<主体2> 的原声台词与轻微椅面摩擦声；4-10秒持续：环境底噪延续到落幅。仅生成人声与环境音效，不要 bgm。
@@ -224,9 +226,10 @@ class DeliveryMarkdownTests(unittest.TestCase):
         self.assertFalse(any("超过保守预算" in e for e in errors))
         self.assertFalse(any("平均不足 2 秒" in w for w in warnings))
 
-    def test_four_native_shots_in_short_node_are_rejected(self):
+    def test_four_native_shots_in_ten_second_node_are_allowed(self):
         candidate = VALID.replace(
             "单一连续镜头，无剪切。中近景",
+            "本段共 4 个约 2–3 秒的硬切镜头。\n"
             "Shot 1: 近景，固定机位。<主体1> 自然眨眼。\n\n"
             "Shot 2: 中近景",
         ).replace(
@@ -235,7 +238,34 @@ class DeliveryMarkdownTests(unittest.TestCase):
             "Shot 4: 固定环境镜头，背景保持低幅微动。\n\n真人实拍",
             1,
         )
-        self.assertTrue(any("4 个生成 Shot" in e for e in self.errors(candidate)))
+        errors, warnings, _ = self.validate_text(candidate)
+        self.assertEqual(errors, [])
+        self.assertFalse(any("万物生式节拍建议" in warning for warning in warnings))
+
+    def test_fifteen_second_wanwu_five_shot_structure_is_valid(self):
+        candidate = VALID.replace("- 总时长：10秒", "- 总时长：15秒").replace(
+            "- 时长：10秒", "- 时长：15秒"
+        ).replace(
+            "单一连续镜头，无剪切。中近景",
+            "本段共 5 个约 2–3 秒的硬切镜头。\n"
+            "Shot 1: 双人中景，建立人物关系和轴线。\n"
+            "Shot 2: <主体1> 反应近景，只保持自然呼吸。\n"
+            "Shot 3: <主体2> 中近景",
+        ).replace(
+            "\n真人实拍",
+            "\nShot 4: <主体1> 反应近景，下颌轻收。\n"
+            "Shot 5: 双人中景，回到关系落幅。\n\n真人实拍",
+            1,
+        )
+        errors, warnings, _ = self.validate_text(candidate)
+        self.assertEqual(errors, [])
+        self.assertFalse(any("建议" in warning and "Shot" in warning for warning in warnings))
+
+    def test_ten_second_continuous_take_requires_story_intent(self):
+        invalid = VALID.replace(
+            "长镜头叙事意图：用不中断的等待保持两人对峙压力。", ""
+        )
+        self.assertTrue(any("缺少长镜头叙事意图" in e for e in self.errors(invalid)))
 
     def test_continuous_take_cannot_mix_with_shot_labels(self):
         invalid = VALID.replace(

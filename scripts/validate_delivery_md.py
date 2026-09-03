@@ -24,6 +24,8 @@ from _shared_patterns import (  # noqa: E402
     LOWER_BODY_LOCK_RE,
     EMPTY_SCENE_RE,
 )
+from _shot_budget import shot_budget_messages  # noqa: E402
+from _fast_drama_contract import prompt_quality_messages  # noqa: E402
 
 
 SEGMENT_HEADING_RE = re.compile(r"^## 生成段 V(\d{2})｜(.+)$", re.M)
@@ -36,6 +38,7 @@ MIXED_ROW_RE = re.compile(
     re.M,
 )
 MIXED_TOKEN_RE = re.compile(r"\{\{Mixed (\d+)\}\}")
+REFERENCE_LIMITS = {"总计": 12, "图片": 9, "视频": 3, "音频": 3}
 SEMANTIC_BINDING_RE = re.compile(r"@\[([^\]]+)\]\s*\{\{Mixed (\d+)\}\}")
 SEMANTIC_NAME_RE = re.compile(r"@\[([^\]]+)\]")
 LEGACY_SHOT_RE = re.compile(r"^镜头\s*(\d+)\s*：", re.M)
@@ -45,6 +48,7 @@ LEGACY_SHOT_BLOCK_RE = re.compile(
 CONTINUOUS_TAKE_RE = re.compile(
     r"单一连续镜头[，,、 ]*无剪切|single continuous take,\s*no cuts", re.I
 )
+LONG_TAKE_INTENT_RE = re.compile(r"长镜头叙事意图\s*[：:]\s*\S+")
 DURATION_RE = re.compile(r"^- 时长：(\d+)秒$", re.M)
 VOICE_STATUS_RE = re.compile(r"^- 音色状态：(.+)$", re.M)
 DELIVERY_GRADE_RE = re.compile(r"^- 交付等级：(预览|正式)$", re.M)
@@ -75,7 +79,7 @@ MODEL_RE = re.compile(r"^- 模型：(.+)$", re.M)
 ASPECT_RATIO_RE = re.compile(r"^- 画幅：(.+)$", re.M)
 RESOLUTION_RE = re.compile(r"^- 分辨率：(.+)$", re.M)
 ABSOLUTE_TIME_RE = re.compile(
-    r"(?:\d{2}:\d{2}\.\d{2}|第\s*\d+(?:\.\d+)?\s*秒|\d+(?:\.\d+)?\s*[–—~-]\s*\d+(?:\.\d+)?\s*秒)"
+    r"(?:\d{2}:\d{2}\.\d{2}|第\s*\d+(?:\.\d+)?\s*秒)"
 )
 
 REQUIRED_SECTIONS = (
@@ -149,7 +153,7 @@ POSTLINE_ENDPOINT_RE = re.compile(
     r"(?:呼吸|鼻息|倾听|听着|继续|自然眨眼|恢复|视线|目光)"
 )
 STABLE_DIALOGUE_CAMERA_RE = re.compile(
-    r"固定机位|稳定机位|锁定机位|稳定近景|固定近景|稳定三分之四侧|稳定过肩"
+    r"固定机位|稳定机位|锁定机位|稳定近景|固定近景|固定过肩机位|稳定三分之四侧|稳定过肩"
 )
 FROZEN_ENDPOINT_RE = re.compile(
     r"(?:说完|闭口).{0,24}(?:立即|马上)?.{0,20}(?:僵住|冻结|不动|完全静止)"
@@ -254,12 +258,14 @@ def has_synchronous_dialogue(prompt: str) -> bool:
         # 不该套用同步对白的开口触发、眼神目标与首帧眼神锚规则。
         if OS_VO_RE.search(trailing_speaker_note(prompt, match.end())):
             continue
-        context = prompt[max(0, match.start() - 80):match.start()]
+        shot_start = prompt.rfind("Shot ", 0, match.start())
+        context = prompt[max(0, shot_start if shot_start >= 0 else match.start() - 180):match.start()]
         immediate = context[-32:]
+        if OS_VO_RE.search(immediate):
+            continue
         if re.search(r"(?:他说|她说|开口说|说出|对白)\s*$", immediate):
             return True
-        if not OS_VO_RE.search(immediate):
-            return True
+        return True
     return False
 
 
@@ -284,7 +290,8 @@ def text_voice_subjects(prompt: str) -> set[str]:
         if noted:
             subjects.add(noted.group(0).strip())
             continue
-        context = prompt[max(0, match.start() - 140):match.start()]
+        shot_start = prompt.rfind("Shot ", 0, match.start())
+        context = prompt[max(0, shot_start if shot_start >= 0 else match.start() - 180):match.start()]
         found = re.findall(r"<主体\d+>", context)
         if found:
             subjects.add(found[-1])
@@ -569,6 +576,8 @@ def validate(
             errors.append(f"{label} 必须恰有一个 LibTV 完成提示词代码块")
             continue
         prompt = prompt_blocks[0].strip()
+        if "主体标签锁定：" not in prompt:
+            errors.append(f"{label} 缺少稳定主体标签锁定行")
 
         rows = [
             (int(number), asset.strip(), media_type.strip(), semantic.strip())
@@ -576,6 +585,18 @@ def validate(
         ]
         if not rows:
             errors.append(f"{label} Mixed 上传表为空")
+        counts = {
+            "图片": sum("图片" in media_type for _, _, media_type, _ in rows),
+            "视频": sum("视频" in media_type for _, _, media_type, _ in rows),
+            "音频": sum("音频" in media_type for _, _, media_type, _ in rows),
+        }
+        counts["总计"] = sum(counts.values())
+        for kind, limit in REFERENCE_LIMITS.items():
+            if counts[kind] > limit:
+                errors.append(
+                    f"{label} 超过 Seedance 2.0 Rule of 12：{kind}={counts[kind]}>{limit}；"
+                    "请拆段或移除非核心道具/背景资产"
+                )
         for _, asset, _, semantic in rows:
             if PLANNING_ASSET_RE.search(f"{asset} {semantic}"):
                 errors.append(f"{label} Mixed 含规划用资产，禁止上传给视频模型：{asset}")
@@ -650,18 +671,26 @@ def validate(
                 errors.append(f"{label} Shot N 编号必须从 1 连续递增")
             if continuous_take:
                 errors.append(f"{label} 不能同时声明连续镜头和 Shot N 剪切")
-            if duration <= 15 and len(shots) > 3:
-                errors.append(
-                    f"{label} {duration} 秒包含 {len(shots)} 个生成 Shot；"
-                    "10–15 秒原生生成通常最多承载 2–3 个清楚事件"
-                )
-            elif duration and len(shots) > 1 and duration / len(shots) < 3:
-                warnings.append(
-                    f"{label} {duration} 秒包含 {len(shots)} 镜，平均不足 3 秒；"
-                    "请确认没有把 v3 内部剪辑节拍误当成模型 Shot"
-                )
         elif not continuous_take:
             errors.append(f"{label} 必须声明“单一连续镜头，无剪切”或使用精确 Shot N:")
+        else:
+            budget_errors, budget_warnings = shot_budget_messages(
+                duration,
+                1,
+                continuous_take=True,
+                has_long_take_intent=bool(LONG_TAKE_INTENT_RE.search(prompt)),
+            )
+            errors.extend(f"{label} {message}" for message in budget_errors)
+            warnings.extend(f"{label} {message}" for message in budget_warnings)
+
+        quality_errors, quality_warnings = prompt_quality_messages(
+            prompt,
+            duration,
+            has_character_references=bool(character_bindings),
+            text_strategy=text_strategy,
+        )
+        errors.extend(f"{label} {message}" for message in quality_errors)
+        warnings.extend(f"{label} {message}" for message in quality_warnings)
 
         for pattern, description in BANNED_PROMPT_PATTERNS:
             if pattern.search(prompt):
@@ -679,9 +708,17 @@ def validate(
             errors.append(f"{label} 提示词含禁用内容：绝对时间码")
 
         if grade == "正式":
-            first_line = prompt.splitlines()[0] if prompt.splitlines() else ""
+            prompt_lines = prompt.splitlines()
+            first_line = prompt_lines[0] if prompt_lines else ""
+            # The mandatory subject-lock line may precede the style spine;
+            # accept the following line as the style lock in that layout.
+            style_line = (
+                prompt_lines[1]
+                if first_line.startswith("主体标签锁定：") and len(prompt_lines) > 1
+                else first_line
+            )
             for present, missing_desc in (
-                (bool(STYLE_LOCK_RE.match(first_line)), "开篇风格锁定行"),
+                (bool(STYLE_LOCK_RE.match(style_line)), "开篇风格锁定行"),
                 (bool(ASSET_ANCHOR_RE.search(prompt)), "逐资产视觉锚定语"),
                 (bool(INLINE_HEX_RE.search(prompt)), "inline HEX 色值"),
                 ("【声音设计】" in prompt, "独立【声音设计】分层段"),
@@ -707,7 +744,7 @@ def validate(
         if slop_count >= 4:
             errors.append(f"{label} 空泛画质词过多，应改为机位、物理光源、动作或声音")
         no_subtitle = any(
-            term in prompt for term in ("无字幕", "NOT字幕", "NOT 字幕", "不出现字幕")
+            term in prompt for term in ("无字幕", "NOT字幕", "NOT 字幕", "不出现字幕", "不新增字幕")
         )
         if not (no_subtitle and "水印" in prompt and "Logo" in prompt):
             errors.append(f"{label} 缺少字幕/水印/Logo 兜底")
@@ -782,15 +819,25 @@ def validate(
                 errors.append(f"{label} 每个对白镜头必须只有一位说话人一个自然意群")
             if any(OS_VO_RE.search(block) for block in sync_blocks):
                 errors.append(f"{label} 同一 Shot 内不能混合口型对白与 OS/VO/旁白")
-            if any(COMPETING_DIALOGUE_ACTION_RE.search(block) for block in sync_blocks):
+            if any(
+                COMPETING_DIALOGUE_ACTION_RE.search(block)
+                and not re.search(r"开口前完成.{0,36}停稳后", block)
+                for block in sync_blocks
+            ):
                 errors.append(f"{label} 同步对白混入走位、道具、群体反应或特效竞争动作")
-            if grade == "正式" and not CLEAN_FRAME_BINDING_RE.search(prompt):
-                errors.append(f"{label} 正式同步对白缺少干净首帧或已验收续接帧眼神锚")
+            if (grade == "正式" or run_status == "可运行") and not CLEAN_FRAME_BINDING_RE.search(prompt):
+                errors.append(
+                    f"{label} 可运行同步对白缺少干净首帧或已验收续接帧眼神锚；"
+                    "预览标签不能绕过"
+                )
             if any(not PRELINE_TRIGGER_RE.search(block) for block in sync_blocks):
                 errors.append(f"{label} 同步对白缺少开口触发")
             if any(not EYE_TARGET_RE.search(block) for block in sync_blocks):
                 errors.append(f"{label} 同步对白缺少具体眼神对象或落点")
-            if any(not POSTLINE_ENDPOINT_RE.search(block) for block in sync_blocks):
+            if any(
+                not POSTLINE_ENDPOINT_RE.search(block) and "声连画断贯穿" not in block
+                for block in sync_blocks
+            ):
                 errors.append(f"{label} 同步对白缺少说完后的可剪辑落点")
             if any(not STABLE_DIALOGUE_CAMERA_RE.search(block) for block in sync_blocks):
                 errors.append(f"{label} 同步对白缺少固定或稳定机位")
