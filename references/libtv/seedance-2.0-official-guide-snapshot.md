@@ -239,7 +239,25 @@ The request failed because the input image 'content[1]' may contain real person
 - **先小成本验证**：新角色资产第一次进视频前，用最短时长/最低分辨率的
   一次性试提交探路，避免直接烧正式段的一次性预算。
 
-> 本条此前 tvskill 完全没有记录，直接导致一次正式段生成失败并永久废掉一个节点。
+### ⚠️ 更正：闸是有的，是没跑
+
+本条**平台限制的文字说明**此前 tvskill 确实没有，但**运行时门禁一直存在**：
+
+```bash
+python3 scripts/audit_canvas_nodes.py --project <N> --node <ID> --pre-run --asset ...
+```
+
+`--pre-run` 会把素材合规态从 warning 升成**硬错误**，本次事故里它能拦住：
+
+```
+ERROR: Seedance 运行前素材合规状态未全部 active：['角色-姜月初', ...]
+```
+
+实际经过是：普通模式跑审计时该项以 `WARNING: 素材合规状态尚未 active` 出现，
+被无视后直接 `node run`，才烧掉一次生成并废掉节点。
+
+**结论不是「tvskill 缺闸」，是「没走 tvskill 的入口」。** 与 SKILL.md 的立场一致：
+能落成闸的规则一律落成闸，只能靠自觉的规则一律假定会被跳过——本次即为后者的实例。
 
 ## 7. 常见问题与官方处理建议
 
