@@ -716,7 +716,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_voice_line_must_reach_prompt_as_braced_text():
+def test_voice_line_must_reach_prompt_with_correct_symbol():
     """语音对账里的台词必须以 {原文} 落进它自己那段的提示词。
 
     2026-09-04 实证：《万妖图录传》EP01 的 V01 只在【声音设计】里写
@@ -735,13 +735,28 @@ def test_voice_line_must_reach_prompt_as_braced_text():
         "【声音设计】<主体1> 完成第一句内心独白。\n```\n"
     )
     errors = module.check_voice_lines_reach_prompt(rows, missing)
-    assert errors and "没有以 {原文} 进入 V01" in errors[0]
+    assert errors and "没有以 『原文』 进入 V01" in errors[0]
 
+    # 内心独白必须用 『』：豆包官方符号表五个符号，tvskill 此前漏了旁白，
+    # 结果内心独白与同步对白同符号，模型无从区分谁该有口型、谁该出字幕。
     present = (
         "## 生成段 V01｜开篇\n\n```text\n"
-        "Shot 2:（苏醒）<主体1> 睁眼，内心独白 {我……穿越了。}，一口自然说完。\n```\n"
+        "Shot 2:（苏醒）<主体1> 睁眼，内心独白 『我……穿越了。』，一口自然说完。\n```\n"
     )
     assert module.check_voice_lines_reach_prompt(rows, present) == []
+
+    # 用错符号要点名，而不是含糊报「没写进提示词」
+    wrong = present.replace("『我……穿越了。』", "{我……穿越了。}")
+    got = module.check_voice_lines_reach_prompt(rows, wrong)
+    assert got and "用错了符号" in got[0] and "『原文』" in got[0]
+
+    # 同步对白（无内心/OS/VO 标记）仍用 {}
+    sync_rows = [(2, "裴长青（虚弱）：[00:40] 过来，扶我起来。", "V01-Shot3", "已落实")]
+    sync_ok = (
+        "## 生成段 V01｜开篇\n\n```text\n"
+        "Shot 3:（伸手）<主体2> 开口说 {过来，扶我起来。}。\n```\n"
+    )
+    assert module.check_voice_lines_reach_prompt(sync_rows, sync_ok) == []
 
 
 def test_posture_must_be_restated_in_every_shot_with_that_subject():

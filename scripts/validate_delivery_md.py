@@ -12,7 +12,8 @@ import sys as _sys
 from pathlib import Path as _Path
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
-from _shared_patterns import (  # noqa: E402
+from _shared_patterns import (
+    NARRATION_RE,  # noqa: E402
     OS_VO_RE,
     DIALOGUE_RE,
     EXACT_SHOT_RE,
@@ -445,10 +446,25 @@ def check_voice_lines_reach_prompt(
         line = normalized_source(line)
         if not line:
             continue
-        spoken = {normalized_source(m) for m in DIALOGUE_RE.findall(prompt)}
-        if line not in spoken:
+        # 内心独白／旁白用 『』，同步对白用 {}。
+        # 豆包官方符号表五个符号，tvskill 此前漏了旁白 —— 结果内心独白与同步对白
+        # 同符号，模型无从区分谁该有口型、谁该出字幕。
+        narration = bool(OS_VO_RE.search(source.split("]", 1)[0] if "]" in source else source))
+        braced = {normalized_source(m) for m in DIALOGUE_RE.findall(prompt)}
+        quoted = {normalized_source(m) for m in NARRATION_RE.findall(prompt)}
+        want, want_sym = (quoted, "『原文』") if narration else (braced, "{原文}")
+        other, other_sym = (braced, "{}") if narration else (quoted, "『』")
+        if line in want:
+            continue
+        if line in other:
             errors.append(
-                f"语音对账第 {index} 行的台词没有以 {{原文}} 进入 {segment_id} 的提示词："
+                f"语音对账第 {index} 行在 {segment_id} 里用错了符号："
+                f"{'内心独白/旁白' if narration else '同步对白'}应写 {want_sym}，"
+                f"现在写成了 {other_sym}；两者同符号会让模型分不清谁该有口型、谁该出字幕"
+            )
+        else:
+            errors.append(
+                f"语音对账第 {index} 行的台词没有以 {want_sym} 进入 {segment_id} 的提示词："
                 f"{source[:40]}；只描述「完成一句独白」不算，模型会自己编台词"
             )
     return errors

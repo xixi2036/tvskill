@@ -27,6 +27,12 @@ OS_VO_RE = re.compile(r"(?<![a-z])(?:OS|VO|os|vo)(?![A-Za-z])|内心|画外音|�
 # 精确台词真值锁：{} 内是逐字台词，{{Mixed N}} 不算。
 DIALOGUE_RE = re.compile(r"(?<!\{)\{([^{}\n]+)\}(?!\})")
 
+# 旁白／内心独白真值锁：『』。
+# 豆包官方 doubao-creative-drama 的符号表有五个符号，tvskill 此前只记了四个，
+# 漏的正是旁白 —— 结果《万妖图录传》EP01 的 24 句里有 18 句内心独白被写成 {}，
+# 与真正的同步对白同符号，模型无从区分谁该有口型、谁该出字幕。
+NARRATION_RE = re.compile(r"『([^』\n]+)』")
+
 # 模型多镜标签。
 EXACT_SHOT_RE = re.compile(r"^Shot\s+(\d+):", re.M)
 # 末镜必须止于第一个【…】小节，否则它会吞掉【声音设计】【关键约束】和收尾行。
