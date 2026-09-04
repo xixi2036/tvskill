@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""整集装配：按段序拼接成片，并按剧本时码烧录字幕。
+
+## 它补的是哪一节
+
+对照巨日禄管线，这是 ⑪「导出：剪映草稿 / 前端预览成片」。tvskill 此前止步于 ⑧，
+每段成片下载到本地就结束了，没有任何工具把它们装配成一集。
+
+## 字幕为什么由本脚本承担而不是模型
+
+视频提示词一律写「保持无字幕，不生成可辨识文字」——让模型渲染汉字既不可靠、
+也会污染画面。字幕是后期通道：本脚本从**原剧本抽出的台词单元**取字，时码取自
+剧本自带的 `[MM:SS]`，因此字幕与剧本逐字一致，不受生成结果影响。
+
+《万妖图录传》参考成片正是这个做法：画面无字，字幕与人物名牌都是后期叠加。
+
+## 用法
+
+    python3 scripts/assemble_episode.py --workdir . --script 01-第01集.docx \\
+        --episode 1 --out 成片/EP01.mp4
+
+    # 不烧字幕，只拼接
+    python3 scripts/assemble_episode.py ... --no-subtitles
+
+退出码：0 成功；2 段落缺失或时长与剧本不符；1 执行错误。
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+
+
+SCRIPTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS))
+
+# 一句字幕最长停留时间：超过它多半是下一句缺时码，宁可短也不要糊在屏幕上。
+MAX_CUE_SECONDS = 6.0
+MIN_CUE_SECONDS = 1.2
+
+
+def srt_time(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0.0
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{int(hours):02d}:{int(minutes):02d}:{int(secs):02d},{int(round((secs % 1) * 1000)):03d}"
+
+
+def build_srt(script: Path, episode: int | None, total: float) -> str:
+    """从原剧本的台词单元生成 SRT：字取剧本原文，时码取剧本自带 [MM:SS]。"""
+    import extract_script_units as extractor
+
+    units = extractor.extract(
+        extractor.read_paragraphs(script), episode, extractor.VOICE_KINDS
+    )
+    cues: list[tuple[float, str]] = []
+    for unit in units:
+        text = str(unit["text"])
+        stamp = re.search(r"\[(\d{1,3}):(\d{2})(?::(\d{2}))?\]", text)
+        if not stamp:
+            continue
+        start = int(stamp.group(1)) * 60 + int(stamp.group(2))
+        if stamp.group(3):
+            start = int(stamp.group(1)) * 3600 + int(stamp.group(2)) * 60 + int(stamp.group(3))
+        line = text.split("]", 1)[1].strip()
+        if line:
+            cues.append((float(start), line))
+    if not cues:
+        return ""
+    blocks: list[str] = []
+    for index, (start, line) in enumerate(cues, 1):
+        nxt = cues[index][0] if index < len(cues) else total
+        end = min(start + MAX_CUE_SECONDS, max(nxt - 0.08, start + MIN_CUE_SECONDS))
+        end = min(end, total)
+        if end <= start:
+            continue
+        blocks.append(f"{index}\n{srt_time(start)} --> {srt_time(end)}\n{line}\n")
+    return "\n".join(blocks)
+
+
+def probe_duration(ffprobe: str, path: Path) -> float:
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", str(path)],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe 失败：{result.stderr.strip()[:200]}")
+    return float(result.stdout.strip().splitlines()[0])
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workdir", default=".")
+    parser.add_argument("--script", type=Path, help="原剧本，用于生成字幕")
+    parser.add_argument("--episode", type=int)
+    parser.add_argument("--out", required=True)
+    parser.add_argument("--no-subtitles", action="store_true")
+    parser.add_argument("--font", default="PingFang SC")
+    parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--ffprobe", default="ffprobe")
+    args = parser.parse_args()
+
+    if not shutil.which(args.ffmpeg) or not shutil.which(args.ffprobe):
+        print("ERROR: 找不到 ffmpeg/ffprobe", file=sys.stderr)
+        return 1
+
+    work = Path(args.workdir).resolve()
+    takes = sorted(
+        (p for p in (work / "takes").glob("V*.mp4") if re.fullmatch(r"V\d{2}", p.stem)),
+        key=lambda p: p.stem,
+    )
+    if not takes:
+        print(f"ERROR: {work / 'takes'} 下没有 V01.mp4 这样的段落成片", file=sys.stderr)
+        return 2
+
+    expected = [f"V{i:02d}" for i in range(1, len(takes) + 1)]
+    actual = [p.stem for p in takes]
+    if actual != expected:
+        print(
+            f"REFUSED: 段落不连续，缺段即为画面丢失。\n  期望：{expected}\n  实际：{actual}",
+            file=sys.stderr,
+        )
+        return 2
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    listing = work / "takes" / "_concat.txt"
+    listing.write_text(
+        "".join(f"file '{p.name}'\n" for p in takes), encoding="utf-8"
+    )
+
+    merged = out.with_name(out.stem + "-无字幕" + out.suffix)
+    # 各段来自同一模型同一参数，编码一致，可以走 concat demuxer 直接流拷贝。
+    result = subprocess.run(
+        [args.ffmpeg, "-v", "error", "-f", "concat", "-safe", "0",
+         "-i", str(listing), "-c", "copy", str(merged), "-y"],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        # 参数不一致时退回重编码，保证一定能出片。
+        result = subprocess.run(
+            [args.ffmpeg, "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", str(listing), "-c:v", "libx264", "-crf", "18",
+             "-c:a", "aac", "-b:a", "192k", str(merged), "-y"],
+            text=True, capture_output=True, check=False,
+        )
+        if result.returncode != 0:
+            print(f"ERROR: 拼接失败：{result.stderr.strip()[:300]}", file=sys.stderr)
+            return 2
+
+    total = probe_duration(args.ffprobe, merged)
+    print(f"拼接完成：{len(takes)} 段 / {total:.2f}s → {merged}", file=sys.stderr)
+
+    if args.no_subtitles or args.script is None:
+        shutil.move(str(merged), str(out))
+        print(f"OK: {out}（未烧字幕）")
+        return 0
+
+    srt_text = build_srt(args.script, args.episode, total)
+    if not srt_text:
+        shutil.move(str(merged), str(out))
+        print(f"OK: {out}（原剧本没有带时码的台词，未烧字幕）")
+        return 0
+    srt = out.with_suffix(".srt")
+    srt.write_text(srt_text, encoding="utf-8")
+
+    style = (
+        f"FontName={args.font},FontSize=20,PrimaryColour=&H00FFFFFF,"
+        "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=0,"
+        "Alignment=2,MarginV=28"
+    )
+    # subtitles 滤镜的路径转义极易写错：在 cwd 下用纯文件名，把转义问题整个绕开。
+    # （2026-09-04 实测：对绝对路径转义 ':' 会让整串被当成一个选项名而报
+    #  "No option name near ..."。）
+    burned = subprocess.run(
+        [args.ffmpeg, "-v", "error", "-i", merged.name,
+         "-vf", f"subtitles=filename={srt.name}:force_style='{style}'",
+         "-c:v", "libx264", "-crf", "18", "-c:a", "copy", out.name, "-y"],
+        text=True, capture_output=True, check=False, cwd=str(out.parent),
+    )
+    if burned.returncode == 0:
+        print(f"OK: {out}（{len(takes)} 段 / {total:.2f}s / 已烧字幕 {srt.name}）")
+        return 0
+
+    # 没编 libass 的 ffmpeg 没有 subtitles 滤镜。字幕是这类短剧的主叙事通道，
+    # 不能因为烧不上就静默丢掉——退回内嵌软字幕轨，并明确告知需要外部工具补烧。
+    soft = subprocess.run(
+        [args.ffmpeg, "-v", "error", "-i", merged.name, "-i", srt.name,
+         "-c", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=chi",
+         out.name, "-y"],
+        text=True, capture_output=True, check=False, cwd=str(out.parent),
+    )
+    if soft.returncode != 0:
+        print(
+            f"ERROR: 既不能烧字幕也不能内嵌软字幕。\n"
+            f"  烧录：{burned.stderr.strip()[:200]}\n"
+            f"  内嵌：{soft.stderr.strip()[:200]}",
+            file=sys.stderr,
+        )
+        return 2
+    print(
+        f"OK: {out}（{len(takes)} 段 / {total:.2f}s / 已内嵌软字幕轨）\n"
+        f"WARNING: 本机 ffmpeg 未编 libass，没有 subtitles 滤镜，无法烧录硬字幕。\n"
+        f"  参考成片以硬字幕为主叙事通道，交付前需用带 libass 的 ffmpeg 或剪映\n"
+        f"  按 {srt.name} 补烧，否则成片信息量低于参考片。"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
