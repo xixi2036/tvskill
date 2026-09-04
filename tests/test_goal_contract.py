@@ -53,6 +53,10 @@ FILLED = """# 万妖图录传 目标契约
 - 验收严格度：十轴审计全过
 """
 
+# 交付 fixture 必须带真正的「### LibTV 完成提示词（整块复制）」代码块：
+# 媒介对账的粒度就是逐条提示词（与 validate_delivery_md.py 的 MEDIUM_RE.search 同粒度），
+# 散文与 NOT 链不再参与。旧 fixture 只有一行散文，正因如此六轮逐任务审查都没暴露
+# 「NOT 三维动画被当成媒介声明」这条硬失败。
 DELIVERY = """# EP01｜LibTV 完成提示词
 
 - 模型：Seedance 2.0 Fast VIP
@@ -60,7 +64,26 @@ DELIVERY = """# EP01｜LibTV 完成提示词
 - 分辨率：480p
 
 ## 生成段 V01｜开场
-镜头1：中景。3D CG 写实国漫质感，画面中主角站在门口。
+
+### LibTV 完成提示词（整块复制）
+
+```text
+主体标签锁定：角色A。
+3D CG 写实国漫质感，中景，画面中主角站在门口。
+NOT slow motion+NOT 真人实拍+NOT 定格动画。
+```
+"""
+
+# 追加一段声明了另一种媒介的正式提示词——反向对账必须抓到。
+DRIFTED_SEGMENT = """
+## 生成段 V02｜追加
+
+### LibTV 完成提示词（整块复制）
+
+```text
+主体标签锁定：角色B。
+真人实拍，近景，自然光。
+```
 """
 
 
@@ -102,6 +125,13 @@ class TestStructureErrors(unittest.TestCase):
         goal, linenos = MODULE.parse(text)
         errors = MODULE.structure_errors(goal, linenos)
         self.assertTrue(any("媒介" in e and "[推断]" in e for e in errors))
+
+    def test_fullwidth_inferred_marker_is_caught(self):
+        # 本分支自己的约束就是「全角标点是承重的」：［推断］不能漏过。
+        text = FILLED.replace("- 媒介：3D CG", "- 媒介：3D CG ［推断］")
+        goal, linenos = MODULE.parse(text)
+        errors = MODULE.structure_errors(goal, linenos)
+        self.assertTrue(any("媒介" in e and "推断" in e for e in errors))
 
     def test_clean_contract_has_no_structure_errors(self):
         goal, linenos = MODULE.parse(FILLED)
@@ -191,7 +221,7 @@ class TestCrosscheck(unittest.TestCase):
 
     def test_reverse_unauthorized_medium_reports(self):
         # 契约声明 3D CG，交付里某一段冒出「真人实拍」——反向对账必须抓到。
-        text = DELIVERY + "\n镜头2：近景。真人实拍，自然光。\n"
+        text = DELIVERY + DRIFTED_SEGMENT
         goal, _ = MODULE.parse(FILLED)
         errors = MODULE.crosscheck(text, goal)
         self.assertTrue(any("真人实拍" in e for e in errors))
@@ -201,10 +231,38 @@ class TestCrosscheck(unittest.TestCase):
         # 交付里同时出现两个不同的标准媒介词，仍必须报错。
         goal, _ = MODULE.parse(FILLED)
         goal["媒介"] = "其它"
-        text = DELIVERY + "\n镜头2：近景。真人实拍，自然光。\n"
+        text = DELIVERY + DRIFTED_SEGMENT
         errors = MODULE.crosscheck(text, goal)
         self.assertTrue(any("其它" in e and "真人实拍" in e for e in errors))
 
+    def test_not_chain_is_not_a_medium_declaration(self):
+        # 强制 NOT 链里的「NOT 三维动画」是**排除**声明，不是媒介声明。
+        # 全文 findall 会把它归一成 3D CG，让真人实拍的契约在自带模板上必然硬失败。
+        goal, _ = MODULE.parse(FILLED)
+        goal["媒介"] = "真人实拍"
+        text = DELIVERY.replace(
+            "3D CG 写实国漫质感，中景，画面中主角站在门口。\n"
+            "NOT slow motion+NOT 真人实拍+NOT 定格动画。",
+            "真人实拍，中景，画面中主角站在门口。\n"
+            "NOT slow motion+NOT 卡通渲染+NOT 三维动画+NOT 换脸。",
+        )
+        self.assertEqual(MODULE.crosscheck(text, goal), [])
+
+    def test_prose_outside_prompt_blocks_is_not_a_medium_declaration(self):
+        goal, _ = MODULE.parse(FILLED)
+        text = DELIVERY + "\n> 说明：本片不是真人实拍，参考片是定格动画。\n"
+        self.assertEqual(MODULE.crosscheck(text, goal), [])
+
+    def test_resolution_case_is_normalized(self):
+        # 契约候选集只给 480p，自带模板与手册都写 480P；大小写敏感比较开箱即炸。
+        goal, _ = MODULE.parse(FILLED)
+        text = DELIVERY.replace("- 分辨率：480p", "- 分辨率：480P")
+        self.assertEqual(MODULE.crosscheck(text, goal), [])
+
+    def test_resolution_mismatch_still_reported_after_normalization(self):
+        goal, _ = MODULE.parse(FILLED)
+        text = DELIVERY.replace("- 分辨率：480p", "- 分辨率：720P")
+        self.assertTrue(any("分辨率" in e for e in MODULE.crosscheck(text, goal)))
     def test_other_medium_consistent_delivery_passes(self):
         goal, _ = MODULE.parse(FILLED)
         goal["媒介"] = "其它"
@@ -221,6 +279,106 @@ class TestCrosscheck(unittest.TestCase):
         goal["对标成片"] = "完全不同的片子"
         goal["BGM"] = "有"
         self.assertEqual(MODULE.crosscheck(DELIVERY, goal), [])
+
+
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "libtv-video-prompts.template.md"
+)
+
+# 与自带交付模板逐字匹配的母契约：媒介 真人实拍、模型/画幅/分辨率取模板头部四行。
+TEMPLATE_CONTRACT = re.sub(
+    r"^- 3D 子风格：.*$", "- 3D 子风格：不适用",
+    re.sub(r"^- 媒介：.*$", "- 媒介：真人实拍", FILLED, flags=re.M),
+    flags=re.M,
+)
+
+
+class TestCrosscheckAgainstShippedTemplate(unittest.TestCase):
+    """拿 skill 自带的真实产物跑对账。
+
+    C2 的两个成因（NOT 链误伤、分辨率大小写）之所以躲过六轮逐任务审查，
+    正是因为分支里没有任何测试拿 crosscheck 跑过真实产物，只跑过六行玩具 fixture。
+    """
+
+    def setUp(self):
+        self.template = TEMPLATE_PATH.read_text(encoding="utf-8")
+        self.goal, self.linenos = MODULE.parse(TEMPLATE_CONTRACT)
+
+    def test_contract_itself_is_legal(self):
+        self.assertEqual(MODULE.structure_errors(self.goal, self.linenos), [])
+        self.assertEqual(MODULE.value_errors(self.goal, self.linenos), [])
+
+    def test_shipped_template_passes_crosscheck(self):
+        self.assertEqual(MODULE.crosscheck(self.template, self.goal), [])
+
+    def test_shipped_template_still_catches_model_drift(self):
+        goal = dict(self.goal, 模型展示名="Seedance 2.0 VIP")
+        self.assertTrue(any("模型展示名" in e for e in MODULE.crosscheck(self.template, goal)))
+
+    def test_shipped_template_still_catches_medium_drift(self):
+        goal = dict(self.goal, 媒介="2D 动漫")
+        errors = MODULE.crosscheck(self.template, goal)
+        self.assertTrue(any("媒介" in e and "真人实拍" in e for e in errors))
+
+
+class TestReconcile(unittest.TestCase):
+    """reconcile()：不完整的 goal 不能被当作没问题（控制者裁决 Ruling-I）。"""
+
+    def test_empty_goal_is_a_hard_error(self):
+        errors = MODULE.reconcile(DELIVERY, {})
+        self.assertTrue(errors)
+        self.assertTrue(any("字段不全" in e or "未落盘" in e for e in errors))
+
+    def test_field_short_goal_is_a_hard_error(self):
+        goal, _ = MODULE.parse(FILLED)
+        goal.pop("成像基底")
+        errors = MODULE.reconcile(DELIVERY, goal)
+        self.assertTrue(any("成像基底" in e for e in errors))
+
+    def test_blank_valued_goal_is_a_hard_error(self):
+        goal, _ = MODULE.parse(FILLED)
+        goal["模型展示名"] = ""
+        self.assertTrue(any("模型展示名" in e for e in MODULE.reconcile(DELIVERY, goal)))
+
+    def test_complete_goal_delegates_to_crosscheck(self):
+        goal, _ = MODULE.parse(FILLED)
+        self.assertEqual(MODULE.reconcile(DELIVERY, goal), [])
+
+
+class TestTemplateCli(unittest.TestCase):
+    """SKILL.md 的第 0 步要能一条命令产出可解析的空白母契约（I2）。"""
+
+    def test_template_flag_prints_parsable_template(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--template"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        goal, _ = MODULE.parse(result.stdout)
+        self.assertEqual(len(goal), len(MODULE.ALL_FIELDS))
+
+    def test_choices_flag_lists_available_values(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--choices"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("模型展示名", result.stdout)
+        self.assertIn("480p", result.stdout)
+
+    def test_skill_md_documents_the_template_entry(self):
+        skill = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("goal_contract.py --template", skill)
+        for field in MODULE.ALL_FIELDS:
+            self.assertIn(field, skill, f"SKILL.md 未列出承重字段名：{field}")
 
 
 class TestDiff(unittest.TestCase):
@@ -329,15 +487,75 @@ class TestPipelineIntake(unittest.TestCase):
             "goalHash": "stale-hash",
             "goal": {"媒介": "3D CG"},
         }
-        dropped, goal_diff = PIPELINE.invalidate_stale(
+        dropped, goal_diff, _ = PIPELINE.invalidate_stale(
             state, "EP01", self.delivery_dir, self.root / "目标契约.md",
         )
         self.assertIn("segments", dropped)
         self.assertIn("script_units", dropped)
-        # intake 不能被自己作废——它是契约本身那一步。
-        self.assertEqual(state["steps"]["intake"], "done")
+        # 控制者裁决 Ruling-I：goalHash 由非空变为不同值时，intake 重置为 pending。
+        # 「intake 不进 GOAL_SENSITIVE」说的是它不因契约变更被**连坐**作废，
+        # 不是说改了契约还算「用户确认过」——它所担保的东西已经换了。
+        self.assertEqual(state["steps"]["intake"], "pending")
+        self.assertNotIn("intake", PIPELINE.GOAL_SENSITIVE)
         # 媒介 前后同值，不应出现在 diff 里；其余字段旧 goal 没有，出现属正常。
         self.assertFalse(any(line.startswith("媒介：") for line in goal_diff))
+
+    def test_first_time_goal_record_does_not_reset_intake(self):
+        # goalHash 由**空**变为有值＝第一次落盘，不是改写，不能反过来打掉刚过的闸。
+        state = {
+            "episode": "EP01",
+            "steps": {"intake": "done"},
+            "deliveryHash": "",
+            "contractHash": PIPELINE.validation_contract_hash(),
+            "goalHash": "",
+            "goal": {},
+        }
+        PIPELINE.invalidate_stale(
+            state, "EP01", self.delivery_dir, self.root / "目标契约.md",
+        )
+        self.assertEqual(state["steps"]["intake"], "done")
+
+    def test_broken_contract_does_not_leave_intake_done(self):
+        # 覆盖契约后写成不可解析的内容：goal 会被清空，此时 intake 绝不能仍是 done。
+        state = {
+            "episode": "EP01",
+            "steps": {step: "done" for step in PIPELINE.STEP_IDS},
+            "deliveryHash": "",
+            "contractHash": PIPELINE.validation_contract_hash(),
+            "goalHash": PIPELINE.file_hash(self.root / "目标契约.md"),
+            "goal": MODULE.parse(FILLED)[0],
+        }
+        (self.root / "目标契约.md").write_text("彻底改坏了", encoding="utf-8")
+        PIPELINE.invalidate_stale(
+            state, "EP01", self.delivery_dir, self.root / "目标契约.md",
+        )
+        self.assertEqual(state["steps"]["intake"], "pending")
+        self.assertEqual(state["goal"], {})
+
+    def test_invalidation_reason_names_the_real_trigger(self):
+        # M1：纯由 goalHash 触发的作废不能套「交付 Markdown 已变更」那句话。
+        state = {
+            "episode": "EP01",
+            "steps": {step: "done" for step in PIPELINE.STEP_IDS},
+            "deliveryHash": "",
+            "contractHash": PIPELINE.validation_contract_hash(),
+            "goalHash": "stale-hash",
+            "goal": {},
+        }
+        _, _, reasons = PIPELINE.invalidate_stale(
+            state, "EP01", self.delivery_dir, self.root / "目标契约.md",
+        )
+        self.assertIn("目标契约已变更", reasons)
+        self.assertNotIn("交付 Markdown 已变更", reasons)
+
+    def test_explicit_missing_goal_path_is_a_hard_error(self):
+        # I1：显式 --goal 指向不存在的文件必须硬错，绝不回退到环境搜索——
+        # 否则闸报「找不到」，state 里却记下了环境里另一份契约的哈希与 18 个字段。
+        with self.assertRaises(OSError) as ctx:
+            PIPELINE.find_goal_contract(
+                self.delivery_dir, self.delivery_dir / "并不存在的契约.md"
+            )
+        self.assertIn("并不存在的契约.md", str(ctx.exception))
 
     def test_goal_diff_reports_changed_field(self):
         state = {
@@ -348,7 +566,7 @@ class TestPipelineIntake(unittest.TestCase):
             "goalHash": "stale-hash",
             "goal": dict(MODULE.parse(FILLED)[0], 媒介="真人实拍"),
         }
-        _, goal_diff = PIPELINE.invalidate_stale(
+        _, goal_diff, _ = PIPELINE.invalidate_stale(
             state, "EP01", self.delivery_dir, self.root / "目标契约.md",
         )
         self.assertIn("媒介：真人实拍 → 3D CG", goal_diff)
@@ -408,6 +626,27 @@ class TestValidatorCrosscheck(unittest.TestCase):
         self._write_state()
         errors, _ = VALIDATOR.check_pipeline_state(self.md)
         self.assertTrue(all("Traceback" not in e for e in errors))
+
+    def test_empty_goal_is_a_hard_error_not_a_skip(self):
+        # Ruling-I：契约被清空后不能「无需对账」——那等于把漂移的模型直接放行。
+        self.state["goal"] = {}
+        self._write_state()
+        errors, _ = VALIDATOR.check_pipeline_state(self.md)
+        self.assertTrue(any("契约" in e for e in errors), errors)
+
+    def test_field_short_goal_is_a_hard_error_not_a_warning(self):
+        # 旧实现在 crosscheck 中途抛 KeyError，把已收集的错误一并丢弃，只留一条 warning。
+        self.state["goal"].pop("画幅")
+        self._write_state()
+        errors, warnings = VALIDATOR.check_pipeline_state(self.md)
+        self.assertTrue(any("画幅" in e for e in errors), (errors, warnings))
+
+    def test_keyframe_is_a_required_prerequisite(self):
+        # M2：这个元组存在的意义正是拦手工篡改的状态文件。
+        self.state["steps"].pop("keyframe")
+        self._write_state()
+        errors, _ = VALIDATOR.check_pipeline_state(self.md)
+        self.assertTrue(any("keyframe" in e for e in errors))
 
 
 if __name__ == "__main__":

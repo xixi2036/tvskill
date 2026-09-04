@@ -6,10 +6,15 @@
 母契约是人读人改的 Markdown（`<项目根>/目标契约.md`）。本模块是它的
 **唯一**解析与校验实现——pipeline_state.py 与 validate_delivery_md.py
 都从这里导入，不各自重新解析，避免"规则散在多处"。
+
+命令行入口（SKILL.md 第 0 步用它起草契约，助手无需背字段名）：
+    python3 scripts/goal_contract.py --template > <项目根>/目标契约.md
+    python3 scripts/goal_contract.py --choices    # 模型/画幅/分辨率的可用候选集
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -74,6 +79,11 @@ def parse(text: str) -> tuple[dict[str, str], dict[str, int]]:
     return goal, linenos
 
 
+# 半角与全角方括号都要认：本 skill 通篇用全角标点，助手照抄正文时极易写成
+# ［推断］，只认半角等于给未确认值开了一个后门。
+INFERRED_MARKER_RE = re.compile(r"[\[［]\s*推断\s*[\]］]")
+
+
 def structure_errors(goal: dict[str, str], linenos: dict[str, int]) -> list[str]:
     """检查未决状态：空值、「待定」、以及未被用户确认掉的「[推断]」标记。"""
     errors: list[str] = []
@@ -85,10 +95,10 @@ def structure_errors(goal: dict[str, str], linenos: dict[str, int]) -> list[str]
                 f"第 {line} 行 {name} 仍为空或「待定」；"
                 "开工前必须由用户裁定，不能带着未决项进入生产"
             )
-        elif "[推断]" in value:
+        elif INFERRED_MARKER_RE.search(value):
             errors.append(
                 f"第 {line} 行 {name} 仍带「[推断]」标记：{value}；"
-                "助手推断值必须经用户确认后去掉该标记"
+                "助手推断值必须经用户确认后去掉该标记（半角［］与全角［］一样算）"
             )
     return errors
 
@@ -189,6 +199,16 @@ _DELIVERY_ANCHORS = {
     "分辨率": re.compile(r"^- 分辨率：(.+)$", re.M),
 }
 
+# 分辨率大小写不敏感：validate_delivery_md.py:684 用 .lower() 归一，
+# available_choices() 只给 480p/720p/1080p，而自带模板与手册都写 480P。
+# 大小写敏感比较会让开箱即用的交付物必然硬失败。
+_NORMALIZERS = {"分辨率": lambda value: value.lower()}
+
+
+def _normalize(name: str, value: str) -> str:
+    return _NORMALIZERS.get(name, lambda text: text)(value.strip())
+
+
 # 与 validate_delivery_md.py:215 的 MEDIUM_RE 保持同一套词。
 _MEDIUM_RE = re.compile(r"真人实拍|2D\s*动漫|二维动漫|3D\s*CG|三维动画|定格动画")
 _MEDIUM_CANONICAL = {
@@ -196,10 +216,31 @@ _MEDIUM_CANONICAL = {
     "三维动画": "3D CG",
 }
 
+# 媒介声明只在正式提示词代码块里算数——与 validate_delivery_md.py:975 逐条提示词
+# 跑 MEDIUM_RE 同粒度。对全文 findall 会把散文、表格，尤其是**强制 NOT 链**里的
+# 「NOT 三维动画」当成媒介声明：自带模板 assets/libtv-video-prompts.template.md
+# 的两条正式提示词都带这条 NOT 链，真人实拍的契约因此开箱即报「未授权的 3D CG」。
+_PROMPT_BLOCK_RE = re.compile(
+    r"### LibTV 完成提示词（整块复制）\s*\n\s*```text\s*\n(.*?)\n```", re.S
+)
+# 排除声明不是媒介声明：`NOT 三维动画`、`禁止真人实拍` 说的都是「不要它」。
+_NEGATION_PREFIX_RE = re.compile(r"(?:NOT|not|禁止|不得|不要|避免|排除)\s*$")
+
 
 def _canonical_medium(token: str) -> str:
     token = re.sub(r"\s+", " ", token).strip()
     return _MEDIUM_CANONICAL.get(token, token)
+
+
+def declared_media(delivery_text: str) -> set[str]:
+    """交付中真正声明了的媒介：逐条正式提示词取词，剔除 NOT 链里的排除项。"""
+    media: set[str] = set()
+    for block in _PROMPT_BLOCK_RE.findall(delivery_text):
+        for match in _MEDIUM_RE.finditer(block):
+            if _NEGATION_PREFIX_RE.search(block[:match.start()]):
+                continue
+            media.add(_canonical_medium(match.group(0)))
+    return media
 
 
 def crosscheck(delivery_text: str, goal: dict[str, str]) -> list[str]:
@@ -223,7 +264,10 @@ def crosscheck(delivery_text: str, goal: dict[str, str]) -> list[str]:
                 f"但交付 Markdown 里找不到对应字段"
             )
             continue
-        wrong = sorted({value for value in found if value != expected})
+        wrong = sorted({
+            value for value in found
+            if _normalize(name, value) != _normalize(name, expected)
+        })
         if wrong:
             errors.append(
                 f"反向对账失败：{name} 契约值＝{expected}，交付值＝{'／'.join(wrong)}；"
@@ -231,7 +275,7 @@ def crosscheck(delivery_text: str, goal: dict[str, str]) -> list[str]:
             )
 
     expected_medium = goal["媒介"].strip()
-    found_media = {_canonical_medium(m) for m in _MEDIUM_RE.findall(delivery_text)}
+    found_media = declared_media(delivery_text)
     if expected_medium == "其它":
         # 「其它」不在 MEDIUM_RE 的词表内，无法与交付中的媒介词等值比对，
         # 故跳过**正向**落点检查。但反向不能一起放行——那会让契约声明「其它」时，
@@ -258,6 +302,25 @@ def crosscheck(delivery_text: str, goal: dict[str, str]) -> list[str]:
     return errors
 
 
+def reconcile(delivery_text: str, goal: dict[str, str]) -> list[str]:
+    """对账的唯一入口：先验 goal 本身完整，再做正反向对账。
+
+    不完整的 goal 不能被当作"没问题"。契约被清空（解析失败时 state["goal"] 落成
+    `{}`）或字段被删掉后，如果这里跳过对账，漂移的模型/画幅/分辨率就被静默放行——
+    而"人确认过"的标记还留在状态文件里。crosscheck() 直接下标取字段，中途抛
+    KeyError 还会把已收集的错误一并丢弃，同样是"不完整＝没问题"的另一种写法。
+    """
+    missing = [name for name in ALL_FIELDS if not (goal.get(name) or "").strip()]
+    if missing:
+        return [
+            "目标契约未落盘或字段不全，无法对账：缺 "
+            f"{'／'.join(missing)}；交付结论必须建立在完整且经用户确认的母契约之上。"
+            "请修好 目标契约.md 后重跑 "
+            "pipeline_state.py complete <集号> intake --manual-confirmed"
+        ]
+    return crosscheck(delivery_text, goal)
+
+
 def diff(old: dict[str, str], new: dict[str, str]) -> list[str]:
     """字段级差异，供作废时告知用户「改了什么」。"""
     changed: list[str] = []
@@ -267,3 +330,27 @@ def diff(old: dict[str, str], new: dict[str, str]) -> list[str]:
         if before != after:
             changed.append(f"{name}：{before} → {after}")
     return changed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--template", action="store_true",
+        help="打印空白母契约模板（六个小节 18 个字段），重定向到 <项目根>/目标契约.md",
+    )
+    group.add_argument(
+        "--choices", action="store_true",
+        help="打印模型展示名／画幅／分辨率的可用候选集，不要手写选项",
+    )
+    args = parser.parse_args()
+    if args.template:
+        sys.stdout.write(TEMPLATE)
+        return 0
+    for name, values in available_choices().items():
+        print(f"{name}：{'／'.join(values)}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
