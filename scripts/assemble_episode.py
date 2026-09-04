@@ -38,6 +38,9 @@ import sys
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
+# 逐段响度归一目标：短剧成片的常用落点。
+LOUDNESS_TARGET = "I=-16:TP=-1.5:LRA=11"
+
 # 一句字幕最长停留时间：超过它多半是下一句缺时码，宁可短也不要糊在屏幕上。
 MAX_CUE_SECONDS = 6.0
 MIN_CUE_SECONDS = 1.2
@@ -203,6 +206,7 @@ def main() -> int:
     parser.add_argument("--episode", type=int)
     parser.add_argument("--out", required=True)
     parser.add_argument("--no-subtitles", action="store_true")
+    parser.add_argument("--no-normalize", action="store_true", help="跳过逐段响度归一")
     parser.add_argument("--font", default="PingFang SC")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
@@ -232,9 +236,38 @@ def main() -> int:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    listing = work / "takes" / "_concat.txt"
+
+    # 逐段响度归一：各段是独立生成任务，响度落点差异很大
+    # （2026-09-04 实测 EP01 七段跨度 -12.6 ~ -25.0 LUFS，12.4 dB）。
+    # 不归一就直接拼，成片音量忽大忽小，是成片级缺陷而非小瑕疵。
+    concat_sources = takes
+    if not args.no_normalize:
+        norm_dir = work / "takes" / "_normalized"
+        norm_dir.mkdir(exist_ok=True)
+        normalized: list[Path] = []
+        for take in takes:
+            target = norm_dir / take.name
+            result = subprocess.run(
+                [args.ffmpeg, "-v", "error", "-i", str(take),
+                 "-c:v", "copy", "-af", f"loudnorm={LOUDNESS_TARGET}",
+                 "-c:a", "aac", "-b:a", "192k", str(target), "-y"],
+                text=True, capture_output=True, check=False,
+            )
+            if result.returncode != 0:
+                print(
+                    f"WARNING: {take.name} 响度归一失败，改用原始音轨："
+                    f"{result.stderr.strip()[:160]}",
+                    file=sys.stderr,
+                )
+                normalized.append(take)
+            else:
+                normalized.append(target)
+        concat_sources = normalized
+        print(f"已逐段归一响度到 {LOUDNESS_TARGET}", file=sys.stderr)
+
+    listing = (concat_sources[0].parent) / "_concat.txt"
     listing.write_text(
-        "".join(f"file '{p.name}'\n" for p in takes), encoding="utf-8"
+        "".join(f"file '{p.name}'\n" for p in concat_sources), encoding="utf-8"
     )
 
     merged = out.with_name(out.stem + "-无字幕" + out.suffix)
