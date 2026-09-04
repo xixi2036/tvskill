@@ -83,6 +83,108 @@ def build_srt(script: Path, episode: int | None, total: float) -> str:
     return "\n".join(blocks)
 
 
+
+# 参考成片的字幕形态：白字、黑描边、居中、贴近下缘。
+SUB_FONT_CANDIDATES = (
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+)
+
+
+def parse_srt(srt_text: str) -> list[tuple[float, float, str]]:
+    cues: list[tuple[float, float, str]] = []
+    for block in srt_text.strip().split("\n\n"):
+        lines = [x for x in block.splitlines() if x.strip()]
+        if len(lines) < 3:
+            continue
+        stamp = re.match(
+            r"(\d+):(\d+):(\d+),(\d+)\s*-->\s*(\d+):(\d+):(\d+),(\d+)", lines[1]
+        )
+        if not stamp:
+            continue
+        g = [int(x) for x in stamp.groups()]
+        start = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000
+        end = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000
+        cues.append((start, end, " ".join(lines[2:])))
+    return cues
+
+
+def burn_with_overlay(args, merged: Path, srt_text: str, out: Path):
+    """没有 subtitles 滤镜时的硬烧路径：Pillow 渲字幕图 + ffmpeg overlay。
+
+    字幕是这类短剧的主叙事通道，退成软字幕等于把主通道关掉，所以先走这条。
+    返回 True 表示成功；返回 str 表示不可用的原因。
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return "缺少 Pillow"
+    font_path = next((f for f in SUB_FONT_CANDIDATES if Path(f).exists()), None)
+    if not font_path:
+        return "找不到可用中文字体"
+    cues = parse_srt(srt_text)
+    if not cues:
+        return "SRT 解析不出字幕行"
+
+    probe = subprocess.run(
+        [args.ffprobe, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(merged)],
+        text=True, capture_output=True, check=False,
+    )
+    if probe.returncode != 0:
+        return "读不到视频尺寸"
+    width, height = (int(x) for x in probe.stdout.strip().split(",")[:2])
+
+    size = max(18, int(height * 0.058))
+    try:
+        font = ImageFont.truetype(font_path, size)
+    except OSError as exc:
+        return f"字体加载失败：{exc}"
+
+    sub_dir = out.parent / (out.stem + "-字幕图")
+    if sub_dir.exists():
+        shutil.rmtree(sub_dir)
+    sub_dir.mkdir(parents=True)
+    pngs: list[Path] = []
+    for index, (_s, _e, line) in enumerate(cues):
+        image = Image.new("RGBA", (width, size * 2), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        box = draw.textbbox((0, 0), line, font=font, stroke_width=3)
+        x = (width - (box[2] - box[0])) // 2 - box[0]
+        y = (size * 2 - (box[3] - box[1])) // 2 - box[1]
+        draw.text(
+            (x, y), line, font=font, fill=(255, 255, 255, 255),
+            stroke_width=3, stroke_fill=(0, 0, 0, 255),
+        )
+        png = sub_dir / f"cue{index:03d}.png"
+        image.save(png)
+        pngs.append(png)
+
+    cmd = [args.ffmpeg, "-v", "error", "-i", str(merged)]
+    for png in pngs:
+        cmd += ["-i", str(png)]
+    margin = max(12, int(height * 0.045))
+    chain: list[str] = []
+    label = "0:v"
+    for index, (start, end, _line) in enumerate(cues):
+        nxt = f"v{index}"
+        chain.append(
+            f"[{label}][{index + 1}:v]overlay=x=0:y=H-h-{margin}:"
+            f"enable='between(t,{start:.3f},{end:.3f})'[{nxt}]"
+        )
+        label = nxt
+    cmd += [
+        "-filter_complex", ";".join(chain),
+        "-map", f"[{label}]", "-map", "0:a?",
+        "-c:v", "libx264", "-crf", "18", "-c:a", "copy", str(out), "-y",
+    ]
+    result = subprocess.run(cmd, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        return f"overlay 烧录失败：{result.stderr.strip()[:200]}"
+    return True
+
+
 def probe_duration(ffprobe: str, path: Path) -> float:
     result = subprocess.run(
         [ffprobe, "-v", "error", "-show_entries", "format=duration",
@@ -189,7 +291,15 @@ def main() -> int:
         return 0
 
     # 没编 libass 的 ffmpeg 没有 subtitles 滤镜。字幕是这类短剧的主叙事通道，
-    # 不能因为烧不上就静默丢掉——退回内嵌软字幕轨，并明确告知需要外部工具补烧。
+    # 不能因为烧不上就退成软字幕——先用 Pillow 自渲字幕图 + overlay 硬烧。
+    burned2 = burn_with_overlay(args, merged, srt_text, out)
+    if burned2 is True:
+        print(f"OK: {out}（{len(takes)} 段 / {total:.2f}s / 已烧硬字幕（Pillow+overlay））")
+        return 0
+    if isinstance(burned2, str):
+        print(f"   自渲字幕不可用：{burned2}", file=sys.stderr)
+
+    # 两条硬烧路径都不通时才退回内嵌软字幕轨，并明确告知。
     soft = subprocess.run(
         [args.ffmpeg, "-v", "error", "-i", merged.name, "-i", srt.name,
          "-c", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=chi",
