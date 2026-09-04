@@ -91,6 +91,17 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 | `canvas` | 画布两阶段预检 | dry-run 与只读审计零硬错误（需用户授权）|
 | `generate` | 顺序生成、验收、返工 | 需用户逐节点授权 |
 
+`generate` 这一步有执行器，不要手工重复调命令：
+
+| 脚本 | 它替你做什么 | 为什么必须走它 |
+|---|---|---|
+| `run_video_node.py` | ③合规校验(verify→轮询 active) → `--pre-run` 门禁 → `tvmao node run` | `node run` 的唯一合法入口。跳过合规校验会被 Ark 以 `InputImageSensitiveContentDetected` 拒绝并烧掉额度 |
+| `run_episode_sequence.py` | 上一段验收 → 导出干净末帧 → 上传为续接帧 → sync 下一段 → 生成 | 「连续性模式：等待上段验收末帧」在提示词侧的落点就是那枚续接帧；手工做一集要 65 次调用，每次都能跳步 |
+| `assemble_episode.py` | 按段拼接 + 按剧本时码生成字幕（缺段即拒） | 字幕从原剧本取字，与剧本逐字一致；画面侧一律无字 |
+
+管线与巨日禄 13 节点的完整对位见
+[自动化管线总图](references/libtv/automation-pipeline-map.md)。
+
 交付 Markdown 一旦改动，`validate` 及其下游步骤**自动作废**（状态机比对内容哈希）——
 避免"改完不重跑校验就交付"。改了内容就要重跑闸，没有例外。
 
