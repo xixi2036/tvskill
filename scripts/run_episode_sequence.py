@@ -214,8 +214,10 @@ def main() -> int:
             cmd += ["--asset", mapping]
         if args.tvmao:
             cmd += ["--tvmao", args.tvmao]
-        code, out = run(cmd)
-        sys.stderr.write(out)
+        # 这一步动辄几分钟。捕获输出会让它整段静默到结束，长队列看着像卡死
+        # （2026-09-04 我自己就据此误判了一次「节点滞留」）。让它直接继承 stderr，
+        # 合规轮询与门禁结论实时可见。
+        code = subprocess.run(cmd, check=False).returncode
         if code != 0:
             print(f"STOPPED: {seg} 未生成成功，就地停住不再往下烧额度", file=sys.stderr)
             return 2
