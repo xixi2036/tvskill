@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import unittest
 from pathlib import Path
 
@@ -87,6 +88,57 @@ class TestStructureErrors(unittest.TestCase):
     def test_clean_contract_has_no_structure_errors(self):
         goal, linenos = MODULE.parse(FILLED)
         self.assertEqual(MODULE.structure_errors(goal, linenos), [])
+
+
+class TestAvailableChoices(unittest.TestCase):
+    def test_model_choices_are_intersection_of_whitelist_and_aliases(self):
+        choices = MODULE.available_choices()
+        self.assertIn("Seedance 2.0 Fast VIP", choices["模型展示名"])
+        # 2.5 在 SUPPORTED_MODELS 里，但 sync 的 MODEL_ALIASES 没有它；
+        # 选了会在 sync 阶段才炸，因此不得进入候选集。
+        self.assertNotIn("Seedance 2.5", choices["模型展示名"])
+
+    def test_ratio_and_resolution_choices_present(self):
+        choices = MODULE.available_choices()
+        self.assertIn("9:16", choices["画幅"])
+        self.assertIn("480p", choices["分辨率"])
+
+
+class TestValueErrors(unittest.TestCase):
+    def _goal(self, **overrides):
+        text = FILLED
+        for key, value in overrides.items():
+            text = re.sub(rf"^- {re.escape(key)}：.*$", f"- {key}：{value}", text, flags=re.M)
+        return MODULE.parse(text)
+
+    def test_clean_contract_has_no_value_errors(self):
+        goal, linenos = MODULE.parse(FILLED)
+        self.assertEqual(MODULE.value_errors(goal, linenos), [])
+
+    def test_illegal_enum_lists_legal_values(self):
+        goal, linenos = self._goal(**{"保真取向": "很电影"})
+        errors = MODULE.value_errors(goal, linenos)
+        self.assertTrue(any("保真取向" in e and "电影感" in e for e in errors))
+
+    def test_3dcg_requires_substyle(self):
+        goal, linenos = self._goal(**{"3D 子风格": "不适用"})
+        errors = MODULE.value_errors(goal, linenos)
+        self.assertTrue(any("3D 子风格" in e for e in errors))
+
+    def test_non_3dcg_requires_substyle_na(self):
+        goal, linenos = self._goal(**{"媒介": "真人实拍"})
+        errors = MODULE.value_errors(goal, linenos)
+        self.assertTrue(any("3D 子风格" in e and "不适用" in e for e in errors))
+
+    def test_cinematic_requires_substrate(self):
+        goal, linenos = self._goal(**{"成像基底": "不适用"})
+        errors = MODULE.value_errors(goal, linenos)
+        self.assertTrue(any("成像基底" in e for e in errors))
+
+    def test_lowfi_requires_substrate_na(self):
+        goal, linenos = self._goal(**{"保真取向": "低保真"})
+        errors = MODULE.value_errors(goal, linenos)
+        self.assertTrue(any("成像基底" in e and "不适用" in e for e in errors))
 
 
 if __name__ == "__main__":
