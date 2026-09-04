@@ -817,14 +817,24 @@ def validate(
             warnings.append(f"{label} 未找到人物独立 Mixed 绑定")
         elif not re.search(r"定义为\s*<主体\d+>", prompt):
             errors.append(f"{label} 人物素材未定义为 <主体N>")
-        if not re.search(r"定义为\s*<场景\d+>", prompt):
-            errors.append(f"{label} 场景素材未定义为 <场景N>")
+        # 起手帧已承载空间、构图、光影，可替代 <场景N> 定义。
+        # 新架构下场景锚不再直接进视频节点（keyframe-composition-contract.md）。
+        if not re.search(r"定义为\s*<场景\d+>", prompt) and not re.search(
+            r"@\[?起手帧", prompt
+        ):
+            errors.append(
+                f"{label} 既没有把场景素材定义为 <场景N>，也没有绑定起手帧；"
+                "二者必居其一——空间信息总要有个来源"
+            )
         if PLANNING_ASSET_RE.search(prompt):
             errors.append(f"{label} 提示词引用了规划图、标记图或位置示意资产")
 
         shots = [int(number) for number in EXACT_SHOT_RE.findall(prompt)]
-        shots_by_segment[actual] = len(shots) if shots else 1
-        continuous_take_segments[actual] = not shots
+        # 时间戳动作规划形态下，第 N 个时间段即对账表里的 Shot N 落点。
+        # 两种形态共用同一套落点编号，对账表不必区分。
+        spans = TIMESTAMP_BLOCK_RE.findall(prompt)
+        shots_by_segment[actual] = len(shots) or len(spans) or 1
+        continuous_take_segments[actual] = not shots and not spans
         color_card_rows = [
             row for row in rows if "色卡" in f"{row[1]} {row[3]}"
         ]

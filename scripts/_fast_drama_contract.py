@@ -189,7 +189,9 @@ def prompt_quality_messages(
         match for match in dialogue_matches
         if len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", match.group(1))) > 18
     ]
-    if long_dialogues and (len(shots) < 2 or "声连画断" not in prompt):
+    # 时间戳形态下「第 N 个时间段」等价于「第 N 镜」，同样构成多机位承载。
+    cut_count = len(shots) or len(spans)
+    if long_dialogues and (cut_count < 2 or "声连画断" not in prompt):
         errors.append(
             "存在超过 18 字的长对白，但没有用多机位声连画断承载；"
             "应在说话人、听者反应、关系镜或物证插入之间连续切换"
