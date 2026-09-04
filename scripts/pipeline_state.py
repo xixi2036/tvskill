@@ -26,11 +26,19 @@ from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 STEPS = [
+    {
+        "id": "intake",
+        "title": "对齐目标并落盘母契约",
+        "requires": [],
+        "gate": "母契约字段齐全、无待定、无残留 [推断]，且由用户 --manual-confirmed 确认",
+    },
     {
         "id": "script_units",
         "title": "抽取原剧本画面单元",
-        "requires": [],
+        "requires": ["intake"],
         "gate": "抽取器跑通且单元数大于 0，产出 <集号>-画面单元.json",
     },
     {
@@ -99,6 +107,8 @@ CONTENT_SENSITIVE = (
 )
 CONTRACT_SENSITIVE = ("validate", "review", "canvas", "generate")
 MANUAL_STEPS = ("review", "canvas", "generate")
+# 目标契约变更时，除 intake 自身外全部作废——契约是所有下游结论的前提。
+GOAL_SENSITIVE = tuple(step_id for step_id in STEP_IDS if step_id != "intake")
 
 
 def state_path(episode: str, directory: Path) -> Path:
@@ -109,10 +119,53 @@ def delivery_path(episode: str, directory: Path) -> Path:
     return directory / f"{episode}-LibTV视频节点提示词.md"
 
 
+GOAL_FILENAME = "目标契约.md"
+GOAL_SEARCH_DEPTH = 3
+
+
+def goal_search_paths(directory: Path) -> list[Path]:
+    """从交付目录起向上最多 3 层的候选路径，顺序即优先级。"""
+    current = directory.resolve()
+    paths = [current / GOAL_FILENAME]
+    for _ in range(GOAL_SEARCH_DEPTH):
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+        paths.append(current / GOAL_FILENAME)
+    return paths
+
+
+def find_goal_contract(directory: Path, explicit: Path | None) -> Path | None:
+    """显式 --goal 优先；否则向上查找。找不到返回 None，不自动创建。
+
+    不自动创建空契约:那会让「用户确认过」这件事失真,而这正是本设计要防的。
+
+    显式 `--goal` 指向不存在的文件是**硬错**，绝不回退到环境搜索：回退的后果
+    已实证——闸报「找不到」，state 里却记下了环境中**另一份**契约的哈希与 18 个
+    字段，用户以为自己在用 A，流程锁住的是 B。
+    """
+    if explicit is not None:
+        if not explicit.exists():
+            raise FileNotFoundError(
+                f"--goal 指定的母契约不存在：{explicit}；"
+                "显式路径不会回退到向上搜索——那会让状态机锁住另一份契约。"
+                "请修正路径，或去掉 --goal 改由 --dir 向上查找"
+            )
+        return explicit
+    for candidate in goal_search_paths(directory):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def load_state(episode: str, directory: Path) -> dict:
     path = state_path(episode, directory)
     if not path.exists():
-        return {"episode": episode, "steps": {}, "deliveryHash": "", "contractHash": ""}
+        return {
+            "episode": episode, "steps": {}, "deliveryHash": "",
+            "contractHash": "", "goalHash": "", "goal": {},
+        }
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -122,6 +175,8 @@ def load_state(episode: str, directory: Path) -> dict:
     value.setdefault("steps", {})
     value.setdefault("deliveryHash", "")
     value.setdefault("contractHash", "")
+    value.setdefault("goalHash", "")
+    value.setdefault("goal", {})
     return value
 
 
@@ -145,6 +200,7 @@ def validation_contract_hash() -> str:
         "_shared_patterns.py",
         "_shot_budget.py",
         "_fast_drama_contract.py",
+        "goal_contract.py",
     ):
         path = SCRIPT_DIR / name
         digest.update(name.encode("utf-8"))
@@ -152,16 +208,27 @@ def validation_contract_hash() -> str:
     return digest.hexdigest()
 
 
-def invalidate_stale(state: dict, episode: str, directory: Path) -> list[str]:
-    """交付 Markdown 变了就作废校验类步骤——防止拿旧结论盖新内容。"""
+def invalidate_stale(
+    state: dict, episode: str, directory: Path, goal_file: Path | None = None,
+) -> tuple[list[str], list[str], list[str]]:
+    """交付 Markdown 或母契约变了就作废对应步骤——防止拿旧结论盖新内容。
+
+    返回 (被作废的步骤, 母契约字段级 diff, 触发源)。触发源要分开报：
+    纯由 goalHash 触发的作废套上"交付 Markdown 已变更"会误导操作者——
+    在完全没有交付 Markdown 的项目里也会这么印。
+    """
+    import goal_contract
+
     current = file_hash(delivery_path(episode, directory))
     dropped: set[str] = set()
+    reasons: list[str] = []
     if current and current != state.get("deliveryHash"):
         dropped.update(
             step_id for step_id in CONTENT_SENSITIVE
             if state["steps"].get(step_id) == "done"
         )
         state["deliveryHash"] = current
+        reasons.append("交付 Markdown 已变更")
     contract = validation_contract_hash()
     if contract != state.get("contractHash"):
         dropped.update(
@@ -169,9 +236,38 @@ def invalidate_stale(state: dict, episode: str, directory: Path) -> list[str]:
             if state["steps"].get(step_id) == "done"
         )
         state["contractHash"] = contract
+        reasons.append("校验器判据已变更")
+
+    goal_diff: list[str] = []
+    if goal_file is None:
+        goal_file = find_goal_contract(directory, None)
+    if goal_file is not None and goal_file.exists():
+        goal_hash = file_hash(goal_file)
+        if goal_hash != state.get("goalHash"):
+            try:
+                new_goal, _ = goal_contract.parse(
+                    goal_file.read_text(encoding="utf-8")
+                )
+            except (goal_contract.GoalContractError, OSError):
+                new_goal = {}
+            goal_diff = goal_contract.diff(state.get("goal") or {}, new_goal)
+            if state.get("goalHash"):
+                dropped.update(
+                    step_id for step_id in GOAL_SENSITIVE
+                    if state["steps"].get(step_id) == "done"
+                )
+                # intake 也要退回 pending：契约被改写（或被改坏）后，"用户逐项
+                # 确认过"这件事只对旧那一版成立。GOAL_SENSITIVE 不含 intake，说的是
+                # 它不因契约变更被连坐作废；不是说改了契约还算确认过——
+                # intake 所担保的东西已经换了，必须重新 --manual-confirmed。
+                if state["steps"].get("intake") == "done":
+                    dropped.add("intake")
+                reasons.append("目标契约已变更")
+            state["goalHash"] = goal_hash
+            state["goal"] = new_goal
     for step_id in dropped:
         state["steps"][step_id] = "pending"
-    return [step_id for step_id in STEP_IDS if step_id in dropped]
+    return [step_id for step_id in STEP_IDS if step_id in dropped], goal_diff, reasons
 
 
 def section(text: str, heading: str) -> str:
@@ -183,9 +279,23 @@ def section(text: str, heading: str) -> str:
     return text[body:body + following.start()] if following else text[body:]
 
 
+def goal_reconciliation(state: dict, delivery_text: str) -> list[str]:
+    """母契约 ↔ 交付 Markdown 的对账，由状态机自己跑。
+
+    run_validator 必须带 --standalone（否则 coverage 死锁），而 --standalone 恰好
+    跳过 check_pipeline_state——对账在校验器里的唯一调用点。于是四个闸曾全都
+    不对账：同一份漂移交付，直接跑校验器报硬错，走状态机 0 条。凭据本来就在
+    状态机手里，对账就在这里跑，两条路径共用 goal_contract.reconcile 同一套判据。
+    """
+    import goal_contract
+
+    return goal_contract.reconcile(delivery_text, state.get("goal") or {})
+
+
 def run_validator(delivery: Path, script: Path | None, episode_no: int | None) -> tuple[bool, str]:
     # 加 --standalone：流程凭据由本状态机自己维护，若让校验器反过来查凭据，
     # coverage 步骤会要求"coverage 已完成"才能通过，形成永远过不去的死锁。
+    # 对账不走这条路径，见 goal_reconciliation()。
     command = [
         sys.executable,
         str(SCRIPT_DIR / "validate_delivery_md.py"),
@@ -208,9 +318,54 @@ def check_step(
     script: Path | None,
     episode_no: int | None,
     manual_confirmed: bool = False,
+    goal_path: Path | None = None,
+    state: dict | None = None,
 ) -> tuple[bool, str]:
     delivery = delivery_path(episode, directory)
     units_file = directory / f"{episode}-画面单元.json"
+    # 对账要拿状态文件里那份**被确认过**的 goal，不是现场重读契约文件：
+    # 现场重读等于"改了契约就自动认账"，人确认这一环就白设了。
+    if state is None:
+        state = load_state(episode, directory)
+
+    if step_id == "intake":
+        # intake 发生在交付 Markdown 存在之前，因此必须放在下方
+        # `if not delivery.exists()` 守卫之前，也不能走 MANUAL_STEPS 分支
+        # ——那条分支会先跑 run_validator，而此时无交付物可校验。
+        import goal_contract
+
+        goal_file = find_goal_contract(directory, goal_path)
+        if goal_file is None:
+            searched = "\n".join(f"    {p}" for p in goal_search_paths(directory))
+            return False, (
+                f"找不到 {GOAL_FILENAME}。搜索过：\n{searched}\n"
+                "  请先起草母契约并经用户逐项确认，再跑本闸。"
+                "本步不会自动创建空契约——那会让「用户确认过」失真。"
+            )
+        try:
+            goal, linenos = goal_contract.parse(
+                goal_file.read_text(encoding="utf-8")
+            )
+        except goal_contract.GoalContractError as exc:
+            return False, str(exc)
+        problems = (
+            goal_contract.structure_errors(goal, linenos)
+            + goal_contract.value_errors(goal, linenos)
+        )
+        if problems:
+            return False, "母契约尚未就绪：\n" + "\n".join(f"  - {p}" for p in problems)
+        if not manual_confirmed:
+            return False, (
+                "母契约字段已齐全，但机器无法证明用户真的看过它。\n"
+                "  助手可以自己编一份契约、自己填满、自己 complete——那样这套闸等于空转。\n"
+                f"  请与用户逐项确认 {goal_file}，确认后用 "
+                "complete <集号> intake --manual-confirmed 显式标记。"
+            )
+        return True, (
+            f"母契约已就绪并经用户确认：{goal_file}\n"
+            f"  媒介={goal['媒介']}／模型={goal['模型展示名']}／"
+            f"画幅={goal['画幅']}／分辨率={goal['分辨率']}"
+        )
 
     if step_id == "script_units":
         if not script:
@@ -341,12 +496,21 @@ def check_step(
             if coverage_errors:
                 return False, "\n".join(coverage_errors)
             return True, "画面对账已逐条对源核验"
+        goal_errors = goal_reconciliation(state, text)
+        if goal_errors:
+            joined = "\n".join(f"ERROR: {line}" for line in goal_errors)
+            return False, f"{output}\n{joined}".strip()
         return ok, output
 
     if step_id in MANUAL_STEPS:
         ok, output = run_validator(delivery, script, episode_no)
         if not ok:
             return False, f"上游确定性校验已失效，先修好再推进：\n{output}"
+        goal_errors = goal_reconciliation(state, text)
+        if goal_errors:
+            return False, "母契约与交付 Markdown 对不上，先对齐再推进：\n" + "\n".join(
+                f"  - {line}" for line in goal_errors
+            )
         if step_id in ("canvas", "generate") and not manual_confirmed:
             # 此前这两步只跑一遍单集校验就返回通过，画布可以从没连过、成片可以不存在，
             # 等于闸是空转的。机器无法替用户连画布与授权生成，但可以拒绝"无凭据即通过"。
@@ -385,11 +549,25 @@ def blocking_prerequisites(step_id: str, state: dict) -> list[str]:
 
 
 def cmd_status(args, state: dict) -> int:
-    dropped = invalidate_stale(state, args.episode, args.dir)
+    dropped, goal_diff, reasons = invalidate_stale(
+        state, args.episode, args.dir, find_goal_contract(args.dir, args.goal)
+    )
     save_state(args.episode, args.dir, state)
     print(f"集号：{args.episode}")
+    if goal_diff:
+        print("⚠ 目标契约已变更：")
+        for line in goal_diff:
+            print(f"    {line}")
     if dropped:
-        print(f"⚠ 交付 Markdown 已变更，以下步骤自动作废需重跑：{dropped}")
+        # 按真实触发源措辞：在完全没有交付 Markdown 的项目里，
+        # 纯由 goalHash 触发的作废也曾被套上"交付 Markdown 已变更"，误导操作者。
+        print(f"⚠ {'；'.join(reasons)}，以下步骤自动作废需重跑：{dropped}")
+        if "intake" in dropped:
+            print(
+                "    intake 也被退回：契约改了，"
+                "「用户逐项确认过」只对旧那一版成立，请重新 "
+                "complete <集号> intake --manual-confirmed"
+            )
     next_step = None
     for step in STEPS:
         status = state["steps"].get(step["id"], "pending")
@@ -419,7 +597,21 @@ def cmd_check(args, state: dict, mark_done: bool) -> int:
     if args.step not in STEP_IDS:
         print(f"ERROR: 未知步骤 {args.step}，可选：{STEP_IDS}", file=sys.stderr)
         return 2
-    invalidate_stale(state, args.episode, args.dir)
+    dropped, goal_diff, reasons = invalidate_stale(
+        state, args.episode, args.dir, find_goal_contract(args.dir, args.goal)
+    )
+    if goal_diff:
+        print("⚠ 目标契约已变更：")
+        for line in goal_diff:
+            print(f"    {line}")
+    if dropped:
+        print(f"⚠ {'；'.join(reasons)}，以下步骤自动作废需重跑：{dropped}")
+        if "intake" in dropped:
+            print(
+                "    intake 也被退回：契约改了，"
+                "「用户逐项确认过」只对旧那一版成立，请重新 "
+                "complete <集号> intake --manual-confirmed"
+            )
     blocked = blocking_prerequisites(args.step, state)
     if blocked:
         print(
@@ -435,6 +627,8 @@ def cmd_check(args, state: dict, mark_done: bool) -> int:
         args.script,
         args.episode_no,
         manual_confirmed=args.manual_confirmed,
+        goal_path=args.goal,
+        state=state,
     )
     print(detail)
     if not ok:
@@ -475,9 +669,14 @@ def main() -> int:
     parser.add_argument("--script", type=Path, help="原剧本 .docx/.txt/.md")
     parser.add_argument("--episode-no", type=int, help="原剧本中的集号数字")
     parser.add_argument(
+        "--goal",
+        type=Path,
+        help=f"母契约路径；省略时从 --dir 向上最多 {GOAL_SEARCH_DEPTH} 层查找 {GOAL_FILENAME}",
+    )
+    parser.add_argument(
         "--manual-confirmed",
         action="store_true",
-        help="仅用于 canvas/generate：确认真实画布或成片审计凭证已落盘",
+        help="用于 intake/canvas/generate：确认用户已逐项确认母契约，或真实画布/成片凭证已落盘",
     )
     args = parser.parse_args()
     try:

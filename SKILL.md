@@ -18,7 +18,7 @@ description: 把中文竖屏短剧剧本走完整条 AI 生产链——提取角
 
 - 每集仍输出一个 `<集号>-LibTV视频节点提示词.md`，文件名暂为兼容既有状态机和 110 项校验保留；画布后端已经是 TVMao。
 - 不生成或交付 `candidate.json`、`asset-plan.json`、`movement-ledger.json`、`reference-manifest.json`。
-- Markdown 为兼容历史交付仍写模型 `Seedance 2.0 Fast VIP`、画幅 `9:16`、分辨率 `480P`；TVMao 同步器把该展示名映射到稳定 `modelId=doubao-seedance-2-0-fast-260128`，并在每次写入前实时校验 schema。用户指定其它模型或参数时必须先通过 schema，不得仅改 Markdown 绕过。
+- Markdown 的模型、画幅、分辨率**不由本文件写死**：三者由 `intake` 步的弹窗交互交给用户选定，写入母契约后由交叉校验保证交付与契约一致。弹窗候选集取 `_shared_patterns.SUPPORTED_MODELS` 与 `sync_delivery_markdown.MODEL_ALIASES` 的**交集**（前者含 `Seedance 2.5` 而后者没有，直接用白名单会让用户选到一个到 sync 阶段才炸的值）。TVMao 同步器把展示名映射到稳定 `modelId` 并在每次写入前实时校验 schema；用户选定的值必须先通过 schema，不得仅改 Markdown 绕过。
 - Markdown 中每一段对应一次 TVMao `video-generator` 生成，段内 `text` 代码块是编译前的最终提示词。
 - 视频执行采用一次性预算：同一节点、同一提示词指纹最多运行一次，禁止点击“重新生成”或对原节点重跑。人物、场景、道具、首帧、音色、入边顺序和台词必须在首次运行前全部审完；图片问题优先在 Codex 图像链中反复修正、逐张跨图验收并晋升新 canonical，再进入视频 Mixed。唯一一次视频仍硬失败时，原节点永久登记为拒绝态；只有根因、失败变量和提示词/引用确实改变后，才允许建立新的版本化节点，并再次只运行一次。
 - Markdown 最终提示词继续使用 `@[语义资产] {{Mixed N}}` 作为兼容内部 DSL；`Mixed N` 按表格总顺序从 1 连续编号。写入 TVMao 时必须编译为画布 canonical `@[图片:<nodeId>]/@[视频:<nodeId>]/@[音频:<nodeId>]`，语义标签紧随 token；网页运行时再按实时入边顺序序列化为 `图片N/视频N/音频N`，三类媒体各自编号。
@@ -81,6 +81,7 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 
 | 步骤 | 做什么 | 闸检查什么 |
 |---|---|---|
+| `intake` | 与用户对齐目标并落盘母契约 | 母契约字段齐全、无待定、无残留 `[推断]`，且带 `--manual-confirmed` |
 | `script_units` | 抽取原剧本的画面单元 | 必须传 `--script` 真读剧本，产出 `<集号>-画面单元.json` |
 | `entities` | 提取人物/场景/道具/色卡 | 四类**都要有显式声明**，本集没有的类别也要写一行"无＋已核对" |
 | `assets` | 资产生产与验收 | 每项资产写明形态；公共素材图片已脱离候选/待生成/待确认状态 |
@@ -91,6 +92,23 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 | `review` | 全剧七遍语义二审 | 机器只保证上游仍有效，结论由人给 |
 | `canvas` | 画布两阶段预检 | dry-run 与只读审计零硬错误（需用户授权）|
 | `generate` | 顺序生成、验收、返工 | 需用户逐节点授权 |
+
+`intake` 与 `review`/`canvas`/`generate` 一样需要 `--manual-confirmed`：闸能验
+「契约文件存在且字段齐全」，验不了「用户真的看过」。助手可以自己编一份契约、
+自己填满、自己 complete——那样这套闸等于空转。
+
+```bash
+python3 scripts/pipeline_state.py complete <集号> intake --manual-confirmed
+```
+
+母契约默认从 `--dir` 向上最多 3 层查找 `目标契约.md`，也可用 `--goal` 显式指定。
+找不到时打印实际搜索过的全部路径，**不自动创建空契约**。显式 `--goal` 指向不存在的
+文件是硬错，**不回退**到向上搜索——回退会让状态机锁住环境里的另一份契约。
+
+契约一旦改写（哈希变化），下游步骤全部作废，`intake` 也退回 `pending`：
+「用户逐项确认过」只对旧那一版成立，必须重新 `--manual-confirmed`。
+`validate`/`review`/`canvas`/`generate` 四个闸每次都拿状态文件里那份被确认过的
+契约与交付 Markdown 做正反向对账，契约缺字段或被清空一律硬错。
 
 `generate` 这一步有执行器，不要手工重复调命令：
 
@@ -135,7 +153,7 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 5. 该 `LOOK-ID` 的保真取向确定走电影感一侧、且正在写起手帧或连续组首镜的风格锁定行时，才读取 [成像基底与光学缺陷库](references/libtv/optical-substrate-library.md)；它是 [起手帧合成合同](references/libtv/keyframe-composition-contract.md) STYLE LOCK 槽位的可选词库，**不是全局默认**——低保真取向（手机、监控、DV、伪纪录）与风格化 3D 不适用，其参数取自外部审美文档、未经 EP 回归验证，与既有合同冲突时以既有合同为准。
 6. 项目没有现成素材、需要先造资产时，完整读取 [资产生产合同](references/libtv/asset-production-contract.md)。
 7. 只有用户要求实际操作 TVMao CLI 时，才读取 [TVMao 画布合同（兼容文件名）](references/libtv/libtv-canvas-contract.md)并核对本机版本与模型 schema。
-8. 只有用户明确要求某镜位试用 Seedance 2.5 时，才读取 [Seedance 2.5 适配（预研·未接入生产）](references/libtv/seedance-2.5-adaptation.md)；`validate_delivery_md.py` 当前只接受 2.0 VIP/Fast VIP 模型名，2.5 尚未进入生产白名单，其余节点继续按第 3 步的 Seedance 2.0 适配生产。
+8. 只有用户明确要求某镜位试用 Seedance 2.5 时，才读取 [Seedance 2.5 适配（预研·未接入生产）](references/libtv/seedance-2.5-adaptation.md)；`_shared_patterns.SUPPORTED_MODELS` 已含 `Seedance 2.5`，但 `sync_delivery_markdown.MODEL_ALIASES` 尚无对应 `modelId` 映射（`:349` 为 `.get(requested, requested)`，未知名原样透传，到 TVMao schema 才报错）。因此 2.5 不在 `intake` 弹窗候选集内，仍未进入生产路由；解除阻断见 [Seedance 2.5 适配](references/libtv/seedance-2.5-adaptation.md) §6。其余节点继续按第 3 步的 Seedance 2.0 适配生产。
 
 ## 核心知识库模块
 
@@ -150,6 +168,45 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 位置图或普通轴线账本而省略。缺失该文件时，tvskill 不具备完整迁移资格。
 
 ## 工作流
+
+### 0. 对齐目标并落盘母契约
+
+拿到剧本后**先不要抽取**。先生成空白母契约，再读剧本并扫描项目既有资产与既有交付把它填满：
+
+```bash
+python3 scripts/goal_contract.py --template > <项目根>/目标契约.md
+python3 scripts/goal_contract.py --choices   # 模型展示名／画幅／分辨率的可用候选集
+```
+
+小标题与字段名是承重的（解析器逐字匹配，不能改写、增删或换标点）。六个小节共 18 个字段：
+
+| 小节 | 字段 |
+|---|---|
+| 媒介与风格 | 媒介、3D 子风格、STYLE-ID、保真取向、成像基底 |
+| 技术口径 | 模型展示名、画幅、分辨率、视频预算路线 |
+| 交付边界 | 交付到哪一步、集数范围 |
+| 资产策略 | 资产来源、跨集身份根归属 |
+| 声音路线 | 音色来源、音色采样预览例外、BGM |
+| 质量目标 | 对标成片、验收严格度 |
+
+填写时：能从现场推断的值标 `[推断]`，推断不出的写 `待定`。
+
+只就「待定」项向用户提问；`[推断]` 项一次性列出供用户否决，不逐条追问——
+这与「本地已有资料先自行发现，不重复向用户索取」同源。模型、画幅、分辨率的
+候选集用 `--choices`（等价于 `goal_contract.available_choices()`）取，不要手写选项。
+
+每次向用户交接只输出四行：
+
+```text
+当前阶段：<stage>
+已完成：<evidence>
+下一步：<single next action>
+需要你决定：<仅在被阻塞或需要批准时出现>
+```
+
+用户逐项确认后去掉 `[推断]` 标记并落盘，再跑 `check`/`complete intake --manual-confirmed`。
+
+**第二集起**：母契约已存在且未变更时不重问任何字段，只做正反向对账并请用户确认一次。
 
 ### 1. 建立内部账本
 
@@ -359,7 +416,7 @@ python3 scripts/extract_voice_reference.py <历史成片.mp4> <角色名-历史�
 复制 [交付模板](assets/libtv-video-prompts.template.md)并严格遵循 [人工复制交付合同](references/libtv/manual-video-node-delivery.md)：
 
 - 全集摘要、段数和总时长；
-- 节点默认模型 `Seedance 2.0 Fast VIP`、画幅 `9:16` 与分辨率 `480P`；
+- 节点默认模型、画幅与分辨率：取 `intake` 步写入母契约的值，不在此写死；
 - 公共素材清单；
 - 按顺序排列的全部生成段；
 - 每段 Mixed 上传顺序；
@@ -472,7 +529,7 @@ Seedance 素材还必须经 `tvmao compliance verify/status` 变为 `active`。�
 - 全剧资料齐全时跨全部集二审；资料不全时明确写“截至EPXX”或“单集”；
 - 确定性校验与七遍语义二审全部通过后才允许标记“已通过”；
 - 生成段编号连续，总时长等于各段时长之和；
-- Markdown 明确标注默认模型 `Seedance 2.0 Fast VIP`、画幅 `9:16`、分辨率 `480P`；
+- Markdown 明确标注默认模型、画幅与分辨率，且三者与母契约逐项一致（由 `validate_delivery_md.py` 的正反向对账硬校验）；
 - 每段 Mixed 上传表与代码块中的 `{{Mixed N}}` 一一对应且连续；
 - 发送画布后，Markdown Mixed 必须已编译为 TVMao node-id mention，并与实时有序入边的类型、编号和素材 ID 一致；任何普通 `@图片N` 文本都不算画布关联，画布只读审计必须零硬错误；
 - 运行前审计凭证必须与当前节点指纹一致；任一字段变化后重新审计，不沿用旧凭证；

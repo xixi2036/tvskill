@@ -49,6 +49,39 @@ ASSETS_FULL = """# EP01｜LibTV 完成提示词
 """
 
 
+GOAL_PATH = Path(__file__).resolve().parents[1] / "scripts" / "goal_contract.py"
+GOAL_SPEC = importlib.util.spec_from_file_location("goal_contract", GOAL_PATH)
+GOAL = importlib.util.module_from_spec(GOAL_SPEC)
+assert GOAL_SPEC.loader is not None
+GOAL_SPEC.loader.exec_module(GOAL)
+
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1] / "assets" / "libtv-video-prompts.template.md"
+)
+
+# 与自带交付模板逐字匹配的母契约（媒介 真人实拍、模型/画幅/分辨率取模板头部四行）。
+TEMPLATE_GOAL = {
+    "媒介": "真人实拍",
+    "3D 子风格": "不适用",
+    "STYLE-ID": "模板-真人实拍",
+    "保真取向": "电影感",
+    "成像基底": "35mm 发行拷贝",
+    "模型展示名": "Seedance 2.0 Fast VIP",
+    "画幅": "9:16",
+    "分辨率": "480p",
+    "视频预算路线": "一次性预算",
+    "交付到哪一步": "仅 Markdown",
+    "集数范围": "EP01-EP12",
+    "资产来源": "全新生成",
+    "跨集身份根归属": "EP01 首建",
+    "音色来源": "人工上传",
+    "音色采样预览例外": "否",
+    "BGM": "无",
+    "对标成片": "模板 EP01",
+    "验收严格度": "十轴审计全过",
+}
+
+
 class PipelineStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -65,6 +98,24 @@ class PipelineStateTests(unittest.TestCase):
 
     def check(self, step: str, script: Path | None = None):
         return MODULE.check_step(step, "EP01", self.dir, script, 1)
+
+    def write_confirmed_state(self, goal: dict | None = None) -> None:
+        """落一份「intake 已由用户确认」的流程凭据。
+
+        review/canvas/generate 三个闸现在真的会拿 state 里的 goal 与交付对账，
+        没有凭据就等于契约未落盘——按裁决那是硬错，不是跳过。
+        """
+        (self.dir / "EP01-run_state.json").write_text(
+            json.dumps({
+                "episode": "EP01",
+                "steps": {step: "done" for step in MODULE.STEP_IDS},
+                "deliveryHash": "",
+                "contractHash": "",
+                "goalHash": "h",
+                "goal": TEMPLATE_GOAL if goal is None else goal,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def test_first_step_extracts_units_from_real_script(self):
         ok, detail = self.check("script_units", self.script)
@@ -162,9 +213,10 @@ class PipelineStateTests(unittest.TestCase):
             "deliveryHash": MODULE.file_hash(self.delivery),
             "contractHash": MODULE.validation_contract_hash(),
         }
-        self.assertEqual(MODULE.invalidate_stale(state, "EP01", self.dir), [])
+        dropped, _, _ = MODULE.invalidate_stale(state, "EP01", self.dir)
+        self.assertEqual(dropped, [])
         self.delivery.write_text(ASSETS_FULL + "\n改了一个字\n", encoding="utf-8")
-        dropped = MODULE.invalidate_stale(state, "EP01", self.dir)
+        dropped, _, _ = MODULE.invalidate_stale(state, "EP01", self.dir)
         self.assertEqual(dropped, list(MODULE.CONTENT_SENSITIVE))
         # 交付 Markdown 是这些步骤的判据来源，改了就全部过期
         for step in ("entities", "assets", "segments", "coverage", "validate"):
@@ -180,7 +232,7 @@ class PipelineStateTests(unittest.TestCase):
             "deliveryHash": MODULE.file_hash(self.delivery),
             "contractHash": "stale-contract",
         }
-        dropped = MODULE.invalidate_stale(state, "EP01", self.dir)
+        dropped, _, _ = MODULE.invalidate_stale(state, "EP01", self.dir)
         self.assertEqual(dropped, list(MODULE.CONTRACT_SENSITIVE))
         for step in MODULE.CONTRACT_SENSITIVE:
             self.assertEqual(state["steps"][step], "pending")
@@ -196,6 +248,7 @@ class PipelineStateTests(unittest.TestCase):
             / "assets" / "libtv-video-prompts.template.md"
         ).read_text(encoding="utf-8")
         self.delivery.write_text(template, encoding="utf-8")
+        self.write_confirmed_state()
         ok, detail = MODULE.check_step("review", "EP01", self.dir, None, None)
         self.assertFalse(ok, detail)
         self.assertIn("待二审", detail)
@@ -207,6 +260,7 @@ class PipelineStateTests(unittest.TestCase):
             / "assets" / "libtv-video-prompts.template.md"
         ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
         self.delivery.write_text(template, encoding="utf-8")
+        self.write_confirmed_state()
         for step in ("canvas", "generate"):
             with self.subTest(step):
                 ok, detail = MODULE.check_step(step, "EP01", self.dir, None, None)
@@ -219,6 +273,7 @@ class PipelineStateTests(unittest.TestCase):
             / "assets" / "libtv-video-prompts.template.md"
         ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
         self.delivery.write_text(template, encoding="utf-8")
+        self.write_confirmed_state()
         for step in ("canvas", "generate"):
             with self.subTest(step):
                 ok, detail = MODULE.check_step(
@@ -238,6 +293,7 @@ class PipelineStateTests(unittest.TestCase):
             / "assets" / "libtv-video-prompts.template.md"
         ).read_text(encoding="utf-8").replace("：待二审", "：已通过")
         self.delivery.write_text(template, encoding="utf-8")
+        self.write_confirmed_state()
         ok, detail = MODULE.check_step("review", "EP01", self.dir, None, None)
         self.assertTrue(ok, detail)
 
@@ -249,7 +305,11 @@ class DeliverableGateTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self._tmp.name)
         self.delivery = self.dir / "EP01-LibTV视频节点提示词.md"
-        self.delivery.write_text(ASSETS_FULL, encoding="utf-8")
+        # 用自带交付模板当交付物：凭据闸现在会连带跑目标契约对账，
+        # 拿真实产物跑才有意义——玩具 fixture 正是 C2 两个成因躲过六轮审查的原因。
+        self.delivery.write_text(
+            TEMPLATE_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+        )
         spec = importlib.util.spec_from_file_location(
             "validate_delivery_md",
             Path(__file__).resolve().parents[1] / "scripts" / "validate_delivery_md.py",
@@ -263,7 +323,10 @@ class DeliverableGateTests(unittest.TestCase):
 
     def write_state(self, steps: dict) -> None:
         (self.dir / "EP01-run_state.json").write_text(
-            json.dumps({"episode": "EP01", "steps": steps, "deliveryHash": ""}),
+            json.dumps({
+                "episode": "EP01", "steps": steps, "deliveryHash": "",
+                "goal": TEMPLATE_GOAL,
+            }, ensure_ascii=False),
             encoding="utf-8",
         )
 
@@ -279,7 +342,8 @@ class DeliverableGateTests(unittest.TestCase):
     def test_complete_state_passes(self):
         self.write_state(
             {s: "done" for s in
-             ("script_units", "entities", "assets", "segments", "coverage")}
+             ("intake", "script_units", "entities", "assets", "segments",
+              "keyframe", "coverage")}
         )
         errors, _ = self.validator.check_pipeline_state(self.delivery)
         self.assertEqual(errors, [])
@@ -289,9 +353,11 @@ class DeliverableGateTests(unittest.TestCase):
             json.dumps({
                 "episode": "EP01",
                 "steps": {s: "done" for s in
-                          ("script_units", "entities", "assets", "segments", "coverage")},
+                          ("intake", "script_units", "entities", "assets",
+                           "segments", "keyframe", "coverage")},
                 "deliveryHash": "0" * 64,
-            }),
+                "goal": TEMPLATE_GOAL,
+            }, ensure_ascii=False),
             encoding="utf-8",
         )
         errors, warnings = self.validator.check_pipeline_state(self.delivery)
@@ -304,6 +370,80 @@ class DeliverableGateTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "scripts" / "pipeline_state.py"
         ).read_text(encoding="utf-8")
         self.assertIn("--standalone", source)
+
+
+class GoalReconciliationInGatesTests(unittest.TestCase):
+    """四个闸必须真正执行对账。
+
+    run_validator 带 --standalone（为破 coverage 死锁而存在，不能删），
+    而 --standalone 恰好跳过 check_pipeline_state —— 对账的唯一调用点。
+    结果是同一份漂移交付：直接跑校验器报硬错，走状态机 0 条。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name)
+        self.script = self.dir / "script.txt"
+        self.script.write_text(SCRIPT, encoding="utf-8")
+        self.delivery = self.dir / "EP01-LibTV视频节点提示词.md"
+        self.delivery.write_text(
+            TEMPLATE_PATH.read_text(encoding="utf-8").replace("：待二审", "：已通过"),
+            encoding="utf-8",
+        )
+        self.addCleanup(self._tmp.cleanup)
+
+    def write_state(self, goal: dict) -> None:
+        (self.dir / "EP01-run_state.json").write_text(
+            json.dumps({
+                "episode": "EP01",
+                "steps": {step: "done" for step in MODULE.STEP_IDS},
+                "deliveryHash": MODULE.file_hash(self.delivery),
+                "contractHash": MODULE.validation_contract_hash(),
+                "goalHash": "h",
+                "goal": goal,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_matching_goal_passes_every_gate(self):
+        """自带模板 + 与之匹配的契约：四个闸都不该报对账错。"""
+        self.write_state(TEMPLATE_GOAL)
+        for step in ("review", "canvas", "generate"):
+            with self.subTest(step):
+                ok, detail = MODULE.check_step(
+                    step, "EP01", self.dir, None, None, manual_confirmed=True,
+                )
+                self.assertTrue(ok, detail)
+
+    def test_drifted_goal_fails_every_gate(self):
+        self.write_state(dict(TEMPLATE_GOAL, 模型展示名="Seedance 2.0 VIP"))
+        for step in ("review", "canvas", "generate"):
+            with self.subTest(step):
+                ok, detail = MODULE.check_step(
+                    step, "EP01", self.dir, None, None, manual_confirmed=True,
+                )
+                self.assertFalse(ok, detail)
+                self.assertIn("对账", detail)
+
+    def test_drifted_medium_fails_validate_gate(self):
+        self.write_state(dict(TEMPLATE_GOAL, 媒介="2D 动漫"))
+        ok, detail = MODULE.check_step(
+            "validate", "EP01", self.dir, self.script, 1,
+        )
+        self.assertFalse(ok)
+        self.assertIn("对账", detail)
+        self.assertIn("媒介", detail)
+
+    def test_emptied_goal_fails_the_gates(self):
+        """契约被清空后闸必须硬错，而不是「无需对账」静默放行。"""
+        self.write_state({})
+        for step in ("review", "canvas", "generate"):
+            with self.subTest(step):
+                ok, detail = MODULE.check_step(
+                    step, "EP01", self.dir, None, None, manual_confirmed=True,
+                )
+                self.assertFalse(ok, detail)
+                self.assertIn("契约", detail)
 
 
 if __name__ == "__main__":

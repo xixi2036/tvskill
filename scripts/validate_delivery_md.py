@@ -763,13 +763,25 @@ def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
         errors.append(f"流程凭据无法解析：{exc}")
         return errors, warnings
     steps = state.get("steps", {})
-    required = ("script_units", "entities", "assets", "segments", "coverage")
+    # keyframe 也在内：经状态机不可达（requires 链强制它先于 coverage），
+    # 但这个元组存在的意义正是拦手工篡改的状态文件，漏一步就是留一个后门。
+    required = (
+        "intake", "script_units", "entities", "assets",
+        "segments", "keyframe", "coverage",
+    )
     missing = [step for step in required if steps.get(step) != "done"]
     if missing:
         errors.append(
             f"流程凭据显示这些前置步骤尚未完成：{missing}；"
             "请回到 pipeline_state.py 依次过闸，不要跳步"
         )
+    # 空 goal 不是"无需对账"，是硬错：契约被清空或字段被删后若在这里跳过，
+    # 漂移的模型/画幅/分辨率会被静默放行，而 intake 仍写着 done。
+    import goal_contract
+
+    errors.extend(
+        goal_contract.reconcile(path.read_text(encoding="utf-8"), state.get("goal") or {})
+    )
     recorded = state.get("deliveryHash", "")
     if recorded:
         import hashlib
