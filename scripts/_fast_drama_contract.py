@@ -5,7 +5,7 @@ from __future__ import annotations
 import collections
 import re
 
-from _shared_patterns import DIALOGUE_RE, EXACT_SHOT_BLOCK_RE, EXACT_SHOT_RE
+from _shared_patterns import DIALOGUE_RE, EXACT_SHOT_BLOCK_RE, EXACT_SHOT_RE, OS_VO_RE
 from _shot_budget import shot_budget_messages
 
 
@@ -62,12 +62,15 @@ def prompt_quality_messages(
     shots = [int(number) for number in EXACT_SHOT_RE.findall(prompt)]
 
     if shots:
-        # 台词字数决定这一段必须留给念白的时间，进而决定镜数上限。
-        # 只按时长给镜数是过拟合：把快切语料的均值套到长对话段上，
-        # 会逼着音画同出的模型在没时间说话的结构里生成（详见 _shot_budget）。
+        # 只有**同步对白**才约束刀长：口型要对上，就必须停在说话人脸上。
+        # 内心独白与画外音不需要口型，压在快切蒙太奇上完全成立——参考成片的
+        # 回忆段正是「快切画面 + 连续独白」。把独白也算进念白时长会误判，
+        # 2026-09-04 首版就把三个纯独白段（V05/V08/V10）错报成长对话段。
         spoken_chars = sum(
             len(re.findall(r"[\u4e00-\u9fff]", line))
-            for line in DIALOGUE_RE.findall(prompt)
+            for block in EXACT_SHOT_BLOCK_RE.findall(prompt) or [prompt]
+            if not OS_VO_RE.search(block)
+            for line in DIALOGUE_RE.findall(block)
         )
         budget_errors, budget_warnings = shot_budget_messages(
             duration, len(shots), spoken_chars=spoken_chars
