@@ -52,9 +52,15 @@ STEPS = [
         "gate": "交付 Markdown 存在生成段与完成提示词代码块",
     },
     {
+        "id": "keyframe",
+        "title": "合成每段起手帧",
+        "requires": ["segments"],
+        "gate": "每个生成段都声明了起手帧，且起手帧不是空场景（不得写「不出现任何人物」）",
+    },
+    {
         "id": "coverage",
         "title": "填写画面对账",
-        "requires": ["segments"],
+        "requires": ["keyframe"],
         "gate": "画面对账逐条对源核验：行数与原文都必须与剧本一致",
     },
     {
@@ -239,6 +245,32 @@ def check_step(
                 "本集确实没有的类别也要写一行说明，沉默不等于没有"
             )
         return True, "资产清单四类齐全"
+
+    if step_id == "keyframe":
+        # 起手帧不是场景图。tvskill 此前把「角色板＋空场景锚＋色卡」直接绑给视频
+        # 节点，让视频模型现场组构图——《万妖图录传》EP01 实证的后果是构图不受控
+        # （定场主体偏小偏远）。万物生的做法是先用图像模型把这一镜的构图、角色站位、
+        # 光影色调钉成一张图，再让视频模型只负责让它动。
+        # 详见 references/libtv/keyframe-composition-contract.md
+        heads = re.findall(r"^## 生成段 (V\d{2})｜", text, re.M)
+        if not heads:
+            return False, "交付 Markdown 里没有生成段，无法核对起手帧"
+        missing = []
+        for seg in heads:
+            block = section(text, f"## 生成段 {seg}｜")
+            if not re.search(r"起手帧[-－]?" + seg + r"|起手帧", block):
+                missing.append(seg)
+        if missing:
+            return False, (
+                f"这些段没有声明起手帧：{missing}；"
+                "每段必须有一张钉死构图、人物在位的起手帧，空场景锚不算"
+            )
+        if "不出现任何人物" in text:
+            return False, (
+                "交付 Markdown 里仍有「不出现任何人物」——那是空场景锚的写法。"
+                "起手帧必须人物在位、站位与构图确定；场景参考降级为合成起手帧时的底子"
+            )
+        return True, f"{len(heads)} 段均已声明起手帧"
 
     if step_id == "assets":
         assets = section(text, "## 资产清单")
