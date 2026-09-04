@@ -29,7 +29,13 @@ DIALOGUE_RE = re.compile(r"(?<!\{)\{([^{}\n]+)\}(?!\})")
 
 # 模型多镜标签。
 EXACT_SHOT_RE = re.compile(r"^Shot\s+(\d+):", re.M)
-EXACT_SHOT_BLOCK_RE = re.compile(r"^Shot\s+\d+:.*?(?=^Shot\s+\d+:|\Z)", re.M | re.S)
+# 末镜必须止于第一个【…】小节，否则它会吞掉【声音设计】【关键约束】和收尾行。
+# 2026-09-04 实证：V06 末镜自身干净，却因【声音设计】里的「内心独白」被判
+# 「同一 Shot 内混合口型对白与 OS/VO」——误报。反向更危险：末镜缺「固定机位」时，
+# 会被【关键约束】里的同名字样冒名满足，漏报。故显式在 ^【 处收边。
+EXACT_SHOT_BLOCK_RE = re.compile(
+    r"^Shot\s+\d+:.*?(?=^Shot\s+\d+:|^【|\Z)", re.M | re.S
+)
 
 # 规划用资产：只服务导演推理，永远不进 Mixed。
 PLANNING_RE = re.compile(

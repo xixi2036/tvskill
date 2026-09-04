@@ -714,3 +714,31 @@ class StatelessReadGateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_voice_line_must_reach_prompt_as_braced_text():
+    """语音对账里的台词必须以 {原文} 落进它自己那段的提示词。
+
+    2026-09-04 实证：《万妖图录传》EP01 的 V01 只在【声音设计】里写
+    「完成第一句内心独白」，未给原文；Seedance 生成出剧本中不存在的
+    「我还活着／那是虎妖王」。台词被静默替换，而对账表全绿。
+
+    更严重的是连带效应：整套同步对白规则（开口触发、眼神落点、固定机位、
+    声连画断）都以 `{}` 内的台词为触发条件，提示词里没有 `{}` 就全部静默失效。
+    """
+    module = MODULE
+    rows = [(1, "姜月初（内心）：[00:03] 我……穿越了。", "V01-Shot2", "已落实")]
+
+    missing = (
+        "## 生成段 V01｜开篇\n\n```text\n"
+        "Shot 2:（苏醒）<主体1> 睁眼。\n\n"
+        "【声音设计】<主体1> 完成第一句内心独白。\n```\n"
+    )
+    errors = module.check_voice_lines_reach_prompt(rows, missing)
+    assert errors and "没有以 {原文} 进入 V01" in errors[0]
+
+    present = (
+        "## 生成段 V01｜开篇\n\n```text\n"
+        "Shot 2:（苏醒）<主体1> 睁眼，内心独白 {我……穿越了。}，一口自然说完。\n```\n"
+    )
+    assert module.check_voice_lines_reach_prompt(rows, present) == []

@@ -405,6 +405,55 @@ def check_coverage_against_script(
     return errors
 
 
+
+VOICE_LANDING_RE = re.compile(r"(V\d{2})-Shot\d+")
+
+
+def check_voice_lines_reach_prompt(
+    voice_rows: list[tuple[int, str, str, str]], text: str
+) -> list[str]:
+    """语音对账里的台词必须真的以 {原文} 落进它自己那段的提示词。
+
+    此前只校验「有台词就要绑音色」，从不校验台词**文本**是否进了提示词。
+    结果是整套同步对白规则（开口触发、眼神落点、固定机位、声连画断）全部静默
+    失效——因为它们都以 `{}` 里的台词为触发条件，而提示词里根本没有 `{}`。
+
+    2026-09-04 实证：《万妖图录传》EP01 的 V01 只在【声音设计】里写了
+    「完成第一句内心独白」，未给原文；成片生成出剧本中不存在的
+    「我还活着／那是虎妖王」。台词被静默替换，对账表却全绿。
+
+    契约本就规定台词用 `{}`（libtv-completed-prompt-format.md:101，
+    真值写法「他说 {精确原文台词}，一口自然说完」）——本函数把它落成闸。
+    """
+    errors: list[str] = []
+    prompts: dict[str, str] = {}
+    heads = list(SEGMENT_HEADING_RE.finditer(text))
+    for i, match in enumerate(heads):
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        block = re.search(r"```text\n(.*?)```", text[match.start():end], re.S)
+        if block:
+            prompts[f"V{match.group(1)}"] = block.group(1)
+    for index, source, landing, _result in voice_rows:
+        landing_match = VOICE_LANDING_RE.search(landing)
+        if not landing_match:
+            continue
+        segment_id = landing_match.group(1)
+        prompt = prompts.get(segment_id)
+        if prompt is None:
+            continue
+        line = source.split("]", 1)[1].strip() if "]" in source else source
+        line = normalized_source(line)
+        if not line:
+            continue
+        spoken = {normalized_source(m) for m in DIALOGUE_RE.findall(prompt)}
+        if line not in spoken:
+            errors.append(
+                f"语音对账第 {index} 行的台词没有以 {{原文}} 进入 {segment_id} 的提示词："
+                f"{source[:40]}；只描述「完成一句独白」不算，模型会自己编台词"
+            )
+    return errors
+
+
 def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
     """交付校验必须有流程凭据：不跑状态机就直接跑本脚本，等于绕过整条流程锁。
 
@@ -1056,6 +1105,7 @@ def validate(
                 errors.append(f"语音对账第 {row_index} 行没有写对账结果")
         if script is not None:
             errors.extend(check_voice_against_script(voice_rows, script, episode))
+        errors.extend(check_voice_lines_reach_prompt(voice_rows, text))
 
     count_match = SEGMENT_COUNT_RE.search(text)
     if not count_match:

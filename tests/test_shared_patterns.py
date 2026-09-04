@@ -69,3 +69,33 @@ class SharedPatternTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_last_shot_block_stops_at_bracket_section():
+    """末镜块必须止于第一个【…】小节。
+
+    2026-09-04 实证：末镜自身干净，却因【声音设计】里的「内心独白」被判
+    「同一 Shot 内混合口型对白与 OS/VO」——误报。反向更危险：末镜缺
+    「固定机位」时会被【关键约束】里的同名字样冒名满足，属漏报。
+    """
+    import importlib.util as _il
+    from pathlib import Path as _P
+    _spec = _il.spec_from_file_location(
+        "_sp", _P(__file__).resolve().parent.parent / "scripts" / "_shared_patterns.py"
+    )
+    _mod = _il.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    EXACT_SHOT_BLOCK_RE = _mod.EXACT_SHOT_BLOCK_RE
+
+    prompt = (
+        "Shot 1:（起手）固定机位，<主体1> 站定。\n\n"
+        "Shot 2:（落幅）<主体1> 开口说 {台词原文}。\n\n"
+        "【声音设计】<主体2> 以气声完成内心独白，不做口型。\n\n"
+        "【关键约束】固定机位铁律：全程不位移。\n"
+    )
+    blocks = EXACT_SHOT_BLOCK_RE.findall(prompt)
+    assert len(blocks) == 2
+    last = blocks[-1]
+    assert "台词原文" in last
+    assert "【声音设计】" not in last, "末镜吞掉了声音设计，会产生 OS/VO 混合误报"
+    assert "【关键约束】" not in last, "末镜吞掉了关键约束，机位检查会被冒名满足"
