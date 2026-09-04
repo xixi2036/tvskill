@@ -393,7 +393,7 @@ python3 scripts/extract_voice_reference.py <历史成片.mp4> <角色名-历史�
 复制 [交付模板](assets/libtv-video-prompts.template.md)并严格遵循 [人工复制交付合同](references/libtv/manual-video-node-delivery.md)：
 
 - 全集摘要、段数和总时长；
-- 节点默认模型 `Seedance 2.0 Fast VIP`、画幅 `9:16` 与分辨率 `480P`；
+- 节点默认模型、画幅与分辨率：取 `intake` 步写入母契约的值，不在此写死；
 - 公共素材清单；
 - 按顺序排列的全部生成段；
 - 每段 Mixed 上传顺序；
@@ -506,7 +506,7 @@ Seedance 素材还必须经 `tvmao compliance verify/status` 变为 `active`。�
 - 全剧资料齐全时跨全部集二审；资料不全时明确写“截至EPXX”或“单集”；
 - 确定性校验与七遍语义二审全部通过后才允许标记“已通过”；
 - 生成段编号连续，总时长等于各段时长之和；
-- Markdown 明确标注默认模型 `Seedance 2.0 Fast VIP`、画幅 `9:16`、分辨率 `480P`；
+- Markdown 明确标注默认模型、画幅与分辨率，且三者与母契约逐项一致（由 `validate_delivery_md.py` 的正反向对账硬校验）；
 - 每段 Mixed 上传表与代码块中的 `{{Mixed N}}` 一一对应且连续；
 - 发送画布后，Markdown Mixed 必须已编译为 TVMao node-id mention，并与实时有序入边的类型、编号和素材 ID 一致；任何普通 `@图片N` 文本都不算画布关联，画布只读审计必须零硬错误；
 - 运行前审计凭证必须与当前节点指纹一致；任一字段变化后重新审计，不沿用旧凭证；
