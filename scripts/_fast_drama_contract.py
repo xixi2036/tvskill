@@ -62,7 +62,16 @@ def prompt_quality_messages(
     shots = [int(number) for number in EXACT_SHOT_RE.findall(prompt)]
 
     if shots:
-        budget_errors, budget_warnings = shot_budget_messages(duration, len(shots))
+        # 台词字数决定这一段必须留给念白的时间，进而决定镜数上限。
+        # 只按时长给镜数是过拟合：把快切语料的均值套到长对话段上，
+        # 会逼着音画同出的模型在没时间说话的结构里生成（详见 _shot_budget）。
+        spoken_chars = sum(
+            len(re.findall(r"[\u4e00-\u9fff]", line))
+            for line in DIALOGUE_RE.findall(prompt)
+        )
+        budget_errors, budget_warnings = shot_budget_messages(
+            duration, len(shots), spoken_chars=spoken_chars
+        )
         errors.extend(budget_errors)
         warnings.extend(budget_warnings)
 

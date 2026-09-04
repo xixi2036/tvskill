@@ -136,3 +136,39 @@ class FastDramaContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_shot_budget_is_dialogue_aware():
+    """长对话段不能套快切基线——那是把整体语料均值过拟合到对话戏上。
+
+    官方指南 §6.1：单场文戏、长对话、情绪递进 → 优先视频延长保持连续；
+    剧情转折、追逐、打斗、蒙太奇 → 独立分段快切。
+
+    2026-09-04 三条独立证据：
+      1. 参考成片《万妖图录传》EP01 对话段(60–150s)中位刀长 4.0 秒，
+         同集开篇蒙太奇 2.8 秒——同一部片子两种节奏；
+      2. 按 12 秒 5 镜下发后，模型自己在有长台词的段少切镜（V09 只切 2 次）；
+      3. Seedance 2.0 音画同出，2.4 秒一刀不给念白与反应留余地。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "_shot_budget.py"
+    spec = importlib.util.spec_from_file_location("_shot_budget", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # 无台词：维持爆款快切基线
+    assert module.recommended_shot_range(12, 0) == (4, 7)
+    # 台词占去半段以上：改用 3.5–5 秒刀长
+    low, high = module.recommended_shot_range(12, 26)
+    assert (low, high) == (2, 4)
+    # 零星短台词不触发
+    assert module.recommended_shot_range(12, 10) == (4, 7)
+
+    # 长对话段切太碎要告警，并说明原因
+    _errors, warns = module.shot_budget_messages(12, 5, spoken_chars=26)
+    assert warns and "长对话段" in warns[0] and "§6.1" in warns[0]
+    # 同样镜数在无台词段不告警
+    _errors, warns_none = module.shot_budget_messages(12, 5, spoken_chars=0)
+    assert not any("长对话段" in w for w in warns_none)
