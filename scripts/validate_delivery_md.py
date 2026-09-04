@@ -661,6 +661,12 @@ def check_storyboard_grammar(text: str) -> tuple[list[str], list[str]]:
                     "须写 [硬切]／[叠化]／[视线跟随切] 之一"
                 )
 
+        if SG.VAGUE_QUALITY_RE.search(prompt):
+            hit = SG.VAGUE_QUALITY_RE.search(prompt).group(0)
+            errors.append(
+                f"{label} 使用了模糊质量词「{hit}」；必须替换为具体的构图、光影、"
+                "色彩、材质或空间描述——风格词不能冒充实质"
+            )
         if SG.ABSTRACT_EMOTION_RE.search(prompt):
             hit = SG.ABSTRACT_EMOTION_RE.search(prompt).group(0)
             errors.append(

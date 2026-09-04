@@ -892,3 +892,29 @@ def test_storyboard_grammar_gates():
     # 旧 Shot N 形态不受本闸约束
     legacy = seg("Shot 1: 稳定中景，姜月初走进屋内。")
     assert module.check_storyboard_grammar(legacy) == ([], [])
+
+
+def test_vague_quality_words_are_rejected():
+    """模糊质量词不能单独作约束。
+
+    对标 doubao-creative-drama assets.md：「禁止使用模糊质量词单独作为约束，
+    例如"高级、漂亮、震撼、氛围感强"，必须替换为具体的构图、光影、色彩、
+    材质和空间描述。」与 zy-cinematic-realism 的 Restraint Test 同向——
+    风格词不能冒充实质。
+    """
+    module = MODULE
+
+    def seg(body: str) -> str:
+        return (
+            "## 生成段 V01｜测试\n\n```text\n"
+            "0-3 秒：[中景｜第三人称客观视角｜固定｜正面] " + body + " [硬切]\n```\n"
+        )
+
+    e, _ = module.check_storyboard_grammar(seg("画面氛围感强，非常高级。"))
+    assert any("模糊质量词" in x for x in e)
+
+    ok = seg(
+        "#3F4A57 铅灰云层占画面上三成，云隙天光自左上斜射落在中景草地形成唯一高亮区；"
+        "青灰草地高粗糙度微反射，湿泥呈窄反射带。"
+    )
+    assert not [x for x in module.check_storyboard_grammar(ok)[0] if "模糊质量词" in x]
