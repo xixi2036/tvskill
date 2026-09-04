@@ -548,6 +548,33 @@ def check_posture_restated_per_shot(
 
 
 
+
+def check_no_duplicate_lines(text: str) -> list[str]:
+    """同一句台词不得在同一个镜头里出现两次。
+
+    2026-09-04 实证：手写镜头文本里已写了台词，自动注入又追加了一遍，
+    同一行里出现两份「内心独白 『我……穿越了。』」。模型会当成要说两遍。
+    交付校验此前只查「台词有没有进提示词」，不查「进了几次」——反例测试暴露的洞。
+    """
+    errors: list[str] = []
+    for index, line in enumerate(text.split("\n"), 1):
+        spoken = [
+            s for s in NARRATION_RE.findall(line) + DIALOGUE_RE.findall(line)
+            if "Mixed" not in s
+        ]
+        seen: dict[str, int] = {}
+        for item in spoken:
+            key = normalized_source(item)
+            seen[key] = seen.get(key, 0) + 1
+        repeated = [k for k, v in seen.items() if v > 1]
+        if repeated:
+            errors.append(
+                f"第 {index} 行同一句台词出现多次：{repeated[:2]}；"
+                "同镜重复会让模型把一句说成两遍"
+            )
+    return errors
+
+
 def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
     """交付校验必须有流程凭据：不跑状态机就直接跑本脚本，等于绕过整条流程锁。
 
@@ -1222,6 +1249,7 @@ def validate(
         if script is not None:
             errors.extend(check_voice_against_script(voice_rows, script, episode))
         errors.extend(check_voice_lines_reach_prompt(voice_rows, text))
+        errors.extend(check_no_duplicate_lines(text))
 
     count_match = SEGMENT_COUNT_RE.search(text)
     if not count_match:

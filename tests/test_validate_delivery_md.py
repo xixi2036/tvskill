@@ -796,3 +796,27 @@ def test_posture_must_be_restated_in_every_shot_with_that_subject():
         ("character:裴长青", "CH-PCQ-v1-重伤-半跪", "CH-PCQ-v1-重伤-站立")
     ]
     assert module.check_posture_restated_per_shot("V11", section2, rows_change) == []
+
+
+def test_same_line_must_not_repeat_in_one_shot():
+    """同一句台词不得在同一个镜头里出现两次。
+
+    2026-09-04 实证：手写镜头文本里已写了台词，自动注入又追加了一遍，
+    同一行出现两份「内心独白 『我……穿越了。』」，模型会把一句说成两遍。
+    交付校验此前只查「台词有没有进提示词」，不查「进了几次」——
+    这个洞是验证方案里的反例测试抓出来的，正例全绿时它一直藏着。
+    """
+    module = MODULE
+    ok = "Shot 2:（苏醒）<主体1> 的内心独白 『我……穿越了。』；闭口不做口型。\n"
+    assert module.check_no_duplicate_lines(ok) == []
+
+    dup = (
+        "Shot 2:（苏醒）<主体1> 的内心独白 『我……穿越了。』；"
+        "<主体1> 的内心独白 『我……穿越了。』。\n"
+    )
+    got = module.check_no_duplicate_lines(dup)
+    assert got and "出现多次" in got[0]
+
+    # {{Mixed N}} 不是台词，不该被算进来
+    mixed = "Shot 1: @[角色] {{Mixed 1}} 与 @[色卡] {{Mixed 1}} 并列。\n"
+    assert module.check_no_duplicate_lines(mixed) == []
