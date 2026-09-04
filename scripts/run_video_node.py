@@ -62,6 +62,9 @@ COMPLIANCE_POLL_INTERVAL = 5.0
 COMPLIANCE_TIMEOUT = 180.0
 # 已是终态、再等也不会变的状态；`pending` 之外的未知状态一律按未就绪处理。
 COMPLIANCE_TERMINAL_BAD = {"rejected", "failed", "blocked"}
+# 生成轮询：12s 视频通常几分钟内收敛，给足冗余但不无限等。
+RUN_POLL_INTERVAL = 10.0
+RUN_TIMEOUT = 900.0
 
 
 def tvmao_json(tvmao: str, args: list[str]) -> object:
@@ -239,7 +242,42 @@ def main() -> int:
     if result.returncode != 0:
         print(result.stderr.rstrip(), file=sys.stderr)
         return 2
+
+    if not args.wait:
+        return 0
+    # `node run --wait` 并不保证阻塞到终态：2026-09-04 实测它返回 0 时节点仍是
+    # generating，下游立刻 `asset download` 就报「还没有产物」。成功与否必须以
+    # 节点状态为准，不能以命令退出码为准。
+    status = wait_until_settled(tvmao, args.project, args.node)
+    if status != "succeeded":
+        print(
+            f"FAILED: 节点最终状态为 {status or '未知'}，本段未出片。\n"
+            "  按一次性预算，该节点已是拒绝态：须先记录根因、改写提示词，"
+            "再建新节点（新指纹）重跑，不得原地重试。",
+            file=sys.stderr,
+        )
+        return 2
     return 0
+
+
+def wait_until_settled(tvmao: str, project: str, node: str) -> str:
+    """轮询到 succeeded/failed 为止；超时返回最后看到的状态。"""
+    deadline = time.monotonic() + RUN_TIMEOUT
+    status = ""
+    while time.monotonic() < deadline:
+        try:
+            payload = tvmao_json(tvmao, ["node", "get", node, "--project", project])
+        except (RuntimeError, json.JSONDecodeError) as exc:
+            print(f"   轮询节点状态失败：{exc}", file=sys.stderr)
+            time.sleep(RUN_POLL_INTERVAL)
+            continue
+        if isinstance(payload, dict):
+            payload = payload.get("node", payload)
+        status = str(payload.get("status") or "") if isinstance(payload, dict) else ""
+        if status in {"succeeded", "failed"}:
+            return status
+        time.sleep(RUN_POLL_INTERVAL)
+    return status
 
 
 if __name__ == "__main__":
