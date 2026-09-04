@@ -54,8 +54,29 @@ def srt_time(seconds: float) -> str:
     return f"{int(hours):02d}:{int(minutes):02d}:{int(secs):02d},{int(round((secs % 1) * 1000)):03d}"
 
 
-def build_srt(script: Path, episode: int | None, total: float) -> str:
-    """从原剧本的台词单元生成 SRT：字取剧本原文，时码取剧本自带 [MM:SS]。"""
+def map_to_actual(start: float, seg_seconds: float, durations: list[float]) -> float:
+    """把剧本时码映射到实际成片时间轴。
+
+    剧本时码假定每段正好 seg_seconds 秒，实际每段是模型返回的时长
+    （2026-09-04 实测 12s 段返回 12.096s）。不映射的话误差按段累积——
+    13 段下来字幕会比语音晚约 1.2 秒，越到后面越明显。
+    """
+    if not durations:
+        return start
+    index = min(int(start // seg_seconds), len(durations) - 1)
+    within = start - index * seg_seconds
+    scale = durations[index] / seg_seconds if seg_seconds else 1.0
+    return sum(durations[:index]) + within * scale
+
+
+def build_srt(
+    script: Path, episode: int | None, total: float,
+    durations: list[float] | None = None, seg_seconds: float = 12.0,
+) -> str:
+    """从原剧本的台词单元生成 SRT：字取剧本原文，时码取剧本自带 [MM:SS]。
+
+    时码再按实际段时长映射到成片时间轴，避免逐段累积漂移。
+    """
     import extract_script_units as extractor
 
     units = extractor.extract(
@@ -72,7 +93,7 @@ def build_srt(script: Path, episode: int | None, total: float) -> str:
             start = int(stamp.group(1)) * 3600 + int(stamp.group(2)) * 60 + int(stamp.group(3))
         line = text.split("]", 1)[1].strip()
         if line:
-            cues.append((float(start), line))
+            cues.append((map_to_actual(float(start), seg_seconds, durations or []), line))
     if not cues:
         return ""
     blocks: list[str] = []
@@ -289,6 +310,7 @@ def main() -> int:
             print(f"ERROR: 拼接失败：{result.stderr.strip()[:300]}", file=sys.stderr)
             return 2
 
+    take_durations = [probe_duration(args.ffprobe, p) for p in concat_sources]
     total = probe_duration(args.ffprobe, merged)
     print(f"拼接完成：{len(takes)} 段 / {total:.2f}s → {merged}", file=sys.stderr)
 
@@ -297,7 +319,7 @@ def main() -> int:
         print(f"OK: {out}（未烧字幕）")
         return 0
 
-    srt_text = build_srt(args.script, args.episode, total)
+    srt_text = build_srt(args.script, args.episode, total, take_durations)
     if not srt_text:
         shutil.move(str(merged), str(out))
         print(f"OK: {out}（原剧本没有带时码的台词，未烧字幕）")
