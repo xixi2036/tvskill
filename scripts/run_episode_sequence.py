@@ -52,10 +52,49 @@ def tvmao_json(tvmao: str, args: list[str]) -> object:
     code, out = run([tvmao, *args])
     if code != 0:
         raise RuntimeError(f"tvmao {' '.join(args)} 失败：{out.strip()[:300]}")
-    match = re.search(r"[\[{]", out)
-    if not match:
-        raise RuntimeError(f"tvmao {' '.join(args)} 未返回 JSON")
-    return json.loads(out[match.start():])
+    return first_json(out, f"tvmao {' '.join(args)}")
+
+
+def all_json(text: str) -> list[object]:
+    """取出输出里所有顶层 JSON 值。
+
+    tvmao 的部分子命令（如 `asset upload`）会先打一段进度 JSON 再打结果 JSON，
+    直接 json.loads 会因「Extra data」崩掉——这正是 2026-09-04 首跑本脚本的失败形态。
+    """
+    decoder = json.JSONDecoder()
+    values: list[object] = []
+    pos = 0
+    while True:
+        match = re.search(r"[\[{]", text[pos:])
+        if not match:
+            return values
+        start = pos + match.start()
+        try:
+            value, end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            pos = start + 1
+            continue
+        values.append(value)
+        pos = start + end
+
+
+def first_json(text: str, what: str) -> object:
+    values = all_json(text)
+    if not values:
+        raise RuntimeError(f"{what} 未返回可解析的 JSON：{text.strip()[:200]}")
+    return values[0]
+
+
+def pick_node_id(text: str) -> str | None:
+    """从可能含多段 JSON 的输出里挑出真正带节点 id 的那一段。"""
+    for value in all_json(text):
+        if not isinstance(value, dict):
+            continue
+        node = value.get("node") if isinstance(value.get("node"), dict) else value
+        node_id = node.get("id") or node.get("nodeId")
+        if isinstance(node_id, str) and node_id.startswith("n-"):
+            return node_id
+    return None
 
 
 def node_status(tvmao: str, project: str, node: str) -> str:
@@ -127,17 +166,14 @@ def main() -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2
         print(f"   已导出续接帧 {frame.name}（须人工确认无闭眼/口型中间态/运动模糊）", file=sys.stderr)
-        try:
-            payload = tvmao_json(
-                tvmao,
-                ["asset", "upload", str(frame), "--create-node", "--project", args.project],
-            )
-        except RuntimeError as exc:
-            print(f"ERROR: 上传续接帧失败：{exc}", file=sys.stderr)
+        code, out = run([
+            tvmao, "asset", "upload", str(frame),
+            "--create-node", "--project", args.project,
+        ])
+        frame_node = pick_node_id(out) if code == 0 else None
+        if not frame_node:
+            print(f"ERROR: 上传续接帧失败：{out.strip()[:300]}", file=sys.stderr)
             return 2
-        if isinstance(payload, dict):
-            payload = payload.get("node", payload)
-        frame_node = payload.get("id") or payload.get("nodeId")
         seg_assets = assets + [f"续接帧-{prev}={frame_node}"]
         print(f"   续接帧节点 {frame_node}", file=sys.stderr)
 
@@ -154,8 +190,9 @@ def main() -> int:
         if code != 0:
             print(f"ERROR: 同步 {seg} 失败：{out.strip()[:400]}", file=sys.stderr)
             return 2
-        match = re.search(r"[\[{]", out)
-        plan = json.loads(out[match.start():]) if match else {}
+        plan = next(
+            (v for v in all_json(out) if isinstance(v, dict) and "nodes" in v), {}
+        )
         if plan.get("missingAssets"):
             print(f"REFUSED: {seg} 仍缺素材：{plan['missingAssets']}", file=sys.stderr)
             return 2
