@@ -454,6 +454,78 @@ def check_voice_lines_reach_prompt(
     return errors
 
 
+
+# 跨段锁定的体位词：状态交接表里出现它们，就意味着这一段该角色的体位是锁死的。
+POSTURE_WORDS = ("坐姿", "跌坐", "半跪", "跪", "站姿", "站立", "俯卧", "仰卧", "躺")
+# 角色语义 → <主体N> 的定义句。
+SUBJECT_DEF_RE = re.compile(
+    r"@\[(?P<sem>[^\]]+)\][^。；\n]{0,80}?定义为\s*(?P<subject><主体\d+>)"
+)
+
+
+def check_posture_restated_per_shot(
+    label: str, section: str, handoff_rows: list[tuple[str, str, str]],
+) -> list[str]:
+    """状态交接表锁了体位，就要在该角色在场的每一个 Shot 正文里复述。
+
+    状态交接表是交付侧台账，**不进模型**。只写在表里，模型看不到，体位就会漂。
+
+    2026-09-04 实证两处：
+    - V02 Shot 4：姜月初该保持坐姿，成片里站了起来。同段 Shot 1／5 都写了
+      「保持坐姿」，Shot 2／3 是闪回人物不在场——唯一在场却漏写的那一镜就是断裂点。
+    - V07 Shot 2：裴长青该保持半跪，成片里站了起来。
+
+    段内合法的体位变化（起身、被拉起）会让本检查误报，故只作警告并点名镜号，
+    由人判断这一镜是「漏写」还是「本就该变」。
+    """
+    warnings: list[str] = []
+    block = re.search(r"```text\n(.*?)```", section, re.S)
+    if not block:
+        return warnings
+    prompt = block.group(1)
+    postures: dict[str, str] = {}
+    for key, entry, exit_state in handoff_rows:
+        if not key.strip().startswith("character:"):
+            continue
+        name = key.split(":", 1)[1].strip()
+        # 入点与出点合起来只出现一个体位词，才算「本段锁死」。
+        # 出现两个不同的（如「半跪」→「站立」）说明段内本就要变，跳过。
+        # 只有一侧写了体位（如入点「半跪开口」、出点「捂胸施压」）仍算锁死——
+        # V07 的裴长青正是这个形状，早期版本因为要求两侧完全一致而漏掉了它。
+        found = {w for w in POSTURE_WORDS if w in entry or w in exit_state}
+        # 「跪」是「半跪」的子串，去掉被包含的粗粒度词，避免自我冲突。
+        found = {w for w in found if not any(w != o and w in o for o in found)}
+        if len(found) == 1:
+            postures[name] = found.pop()
+
+    if not postures:
+        return warnings
+
+    subjects = {
+        match.group("sem"): match.group("subject")
+        for match in SUBJECT_DEF_RE.finditer(prompt)
+    }
+    shots = EXACT_SHOT_BLOCK_RE.findall(prompt)
+    for name, word in postures.items():
+        subject = next(
+            (tag for sem, tag in subjects.items() if name in sem), None
+        )
+        if not subject:
+            continue
+        missing = [
+            index
+            for index, shot in enumerate(shots, 1)
+            if subject in shot and word not in shot
+        ]
+        if missing:
+            warnings.append(
+                f"{label} 状态交接把 {name} 锁为「{word}」，但 Shot "
+                f"{'、'.join(str(i) for i in missing)} 里出现了 {subject} 却没复述体位；"
+                "状态交接表不进模型，漏写的那一镜体位就会漂"
+            )
+    return warnings
+
+
 def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
     """交付校验必须有流程凭据：不跑状态机就直接跑本脚本，等于绕过整条流程锁。
 
@@ -618,6 +690,10 @@ def validate(
             ]
             if not handoff_rows:
                 errors.append(f"{label} 状态交接没有有效状态行")
+            else:
+                warnings.extend(
+                    check_posture_restated_per_shot(label, section, handoff_rows)
+                )
         if "### 剧本事实对账" not in section:
             errors.append(f"{label} 缺少剧本事实对账")
         elif "| 类型 | 原剧本事实 | 提示词落实 | 结果 |" not in section:

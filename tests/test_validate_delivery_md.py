@@ -742,3 +742,42 @@ def test_voice_line_must_reach_prompt_as_braced_text():
         "Shot 2:（苏醒）<主体1> 睁眼，内心独白 {我……穿越了。}，一口自然说完。\n```\n"
     )
     assert module.check_voice_lines_reach_prompt(rows, present) == []
+
+
+def test_posture_must_be_restated_in_every_shot_with_that_subject():
+    """状态交接表锁了体位，就要在该角色在场的每一个 Shot 正文里复述。
+
+    2026-09-04 实证两处：V02 Shot 4 姜月初该坐着却站起、V07 裴长青该半跪却站起。
+    两处的根因相同——体位只写在段末【状态交接】表，而那张表不进模型。
+
+    V02 的逐镜核查尤其说明问题：Shot 1／5 都写了「保持坐姿」，Shot 2／3 是闪回、
+    人物不在场，**唯一在场却漏写的 Shot 4 就是断裂点**。所以规则是逐镜复述，
+    不是「段内提过一次就行」。
+    """
+    module = MODULE
+    section = (
+        "```text\n"
+        "将 @[角色-姜月初]（角色-姜月初） 中的稳定身份特征定义为 <主体1>，不可改造。\n\n"
+        "Shot 1:（起手）<主体1> 保持坐姿，视线落在前方。\n\n"
+        "Shot 2:（延续）<主体1> 微微喘气，肩线起伏。\n\n"
+        "Shot 3:（空镜）硝烟掠过，无人物。\n"
+        "```\n"
+    )
+    rows = [("character:姜月初", "CH-JYC-v1-坐姿-尸堆中", "CH-JYC-v1-坐姿-注视前方")]
+    got = module.check_posture_restated_per_shot("V02", section, rows)
+    assert got and "Shot 2" in got[0] and "坐姿" in got[0]
+    assert "Shot 1" not in got[0], "写了体位的镜不该被点名"
+    assert "Shot 3" not in got[0], "该角色不在场的镜不该被点名"
+
+    # 只有一侧写了体位也算锁死——V07 裴长青正是这个形状
+    rows_one_sided = [
+        ("character:裴长青", "CH-PCQ-v1-重伤-半跪开口", "CH-PCQ-v1-重伤-捂胸施压")
+    ]
+    section2 = section.replace("角色-姜月初", "角色-裴长青")
+    assert module.check_posture_restated_per_shot("V07", section2, rows_one_sided)
+
+    # 段内本就要变体位（半跪→站立）时不报
+    rows_change = [
+        ("character:裴长青", "CH-PCQ-v1-重伤-半跪", "CH-PCQ-v1-重伤-站立")
+    ]
+    assert module.check_posture_restated_per_shot("V11", section2, rows_change) == []
