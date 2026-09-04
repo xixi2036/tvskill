@@ -598,13 +598,24 @@ def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
         errors.append(f"流程凭据无法解析：{exc}")
         return errors, warnings
     steps = state.get("steps", {})
-    required = ("script_units", "entities", "assets", "segments", "coverage")
+    required = ("intake", "script_units", "entities", "assets", "segments", "coverage")
     missing = [step for step in required if steps.get(step) != "done"]
     if missing:
         errors.append(
             f"流程凭据显示这些前置步骤尚未完成：{missing}；"
             "请回到 pipeline_state.py 依次过闸，不要跳步"
         )
+    goal = state.get("goal") or {}
+    if goal:
+        import goal_contract
+
+        try:
+            errors.extend(
+                goal_contract.crosscheck(path.read_text(encoding="utf-8"), goal)
+            )
+        except KeyError as exc:
+            # 母契约字段不全时不在这里崩，交由 pipeline_state 的 intake 闸报。
+            warnings.append(f"目标契约字段不全，跳过对账：缺 {exc}")
     recorded = state.get("deliveryHash", "")
     if recorded:
         import hashlib

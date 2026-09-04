@@ -280,7 +280,7 @@ class DeliverableGateTests(unittest.TestCase):
     def test_complete_state_passes(self):
         self.write_state(
             {s: "done" for s in
-             ("script_units", "entities", "assets", "segments", "coverage")}
+             ("intake", "script_units", "entities", "assets", "segments", "coverage")}
         )
         errors, _ = self.validator.check_pipeline_state(self.delivery)
         self.assertEqual(errors, [])
@@ -290,7 +290,7 @@ class DeliverableGateTests(unittest.TestCase):
             json.dumps({
                 "episode": "EP01",
                 "steps": {s: "done" for s in
-                          ("script_units", "entities", "assets", "segments", "coverage")},
+                          ("intake", "script_units", "entities", "assets", "segments", "coverage")},
                 "deliveryHash": "0" * 64,
             }),
             encoding="utf-8",

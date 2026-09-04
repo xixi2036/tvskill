@@ -354,5 +354,61 @@ class TestPipelineIntake(unittest.TestCase):
         self.assertIn("媒介：真人实拍 → 3D CG", goal_diff)
 
 
+VALIDATOR_PATH = Path(__file__).resolve().parents[1] / "scripts" / "validate_delivery_md.py"
+VALIDATOR_SPEC = importlib.util.spec_from_file_location("validate_delivery_md", VALIDATOR_PATH)
+VALIDATOR = importlib.util.module_from_spec(VALIDATOR_SPEC)
+assert VALIDATOR_SPEC.loader is not None
+VALIDATOR_SPEC.loader.exec_module(VALIDATOR)
+
+
+class TestValidatorCrosscheck(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.md = self.dir / "EP01-LibTV视频节点提示词.md"
+        self.md.write_text(DELIVERY, encoding="utf-8")
+        goal, _ = MODULE.parse(FILLED)
+        self.state = {
+            "episode": "EP01",
+            "steps": {s: "done" for s in ("intake", "script_units", "entities",
+                                          "assets", "segments", "keyframe", "coverage")},
+            "deliveryHash": "",
+            "contractHash": "",
+            "goalHash": "h",
+            "goal": goal,
+        }
+
+    def _write_state(self):
+        (self.dir / "EP01-run_state.json").write_text(
+            json.dumps(self.state, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def test_consistent_delivery_adds_no_goal_errors(self):
+        self._write_state()
+        errors, _ = VALIDATOR.check_pipeline_state(self.md)
+        self.assertEqual([e for e in errors if "对账" in e], [])
+
+    def test_model_drift_reported(self):
+        self.state["goal"]["模型展示名"] = "Seedance 2.0 VIP"
+        self._write_state()
+        errors, _ = VALIDATOR.check_pipeline_state(self.md)
+        self.assertTrue(any("对账" in e and "模型展示名" in e for e in errors))
+
+    def test_intake_is_a_required_prerequisite(self):
+        # 不跑 intake 就不该通过 validate:否则 goal 为空、对账被跳过,整套闸形同虚设。
+        self.state["steps"].pop("intake")
+        self._write_state()
+        errors, _ = VALIDATOR.check_pipeline_state(self.md)
+        self.assertTrue(any("intake" in e for e in errors))
+
+    def test_missing_goal_block_is_not_fatal(self):
+        # 尚未跑过 intake 的旧状态文件不应让校验器崩溃。
+        self.state.pop("goal")
+        self._write_state()
+        errors, _ = VALIDATOR.check_pipeline_state(self.md)
+        self.assertTrue(all("Traceback" not in e for e in errors))
+
+
 if __name__ == "__main__":
     unittest.main()
