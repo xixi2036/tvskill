@@ -166,21 +166,40 @@ def burn_with_overlay(args, merged: Path, srt_text: str, out: Path):
     except OSError as exc:
         return f"字体加载失败：{exc}"
 
+    # 长句必须换行：864px 宽、28px 字，一行放不下 30 字，直接渲染会左右溢出被裁。
+    # （2026-09-04 实测成片 95s 处那条 30 字独白开头缺字。）
+    def wrap(line: str) -> list[str]:
+        limit = max(8, int((width * 0.92) // size))
+        if len(line) <= limit:
+            return [line]
+        # 优先在标点处断，断不开再按字数硬断
+        for mark in ("。", "，", "、", "；", "？", "！"):
+            pos = line.rfind(mark, 0, limit + 1)
+            if pos >= limit // 2:
+                head, tail = line[: pos + 1], line[pos + 1:].strip()
+                return [head] + (wrap(tail) if tail else [])
+        return [line[:limit]] + wrap(line[limit:])
+
     sub_dir = out.parent / (out.stem + "-字幕图")
     if sub_dir.exists():
         shutil.rmtree(sub_dir)
     sub_dir.mkdir(parents=True)
     pngs: list[Path] = []
     for index, (_s, _e, line) in enumerate(cues):
-        image = Image.new("RGBA", (width, size * 2), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        box = draw.textbbox((0, 0), line, font=font, stroke_width=3)
-        x = (width - (box[2] - box[0])) // 2 - box[0]
-        y = (size * 2 - (box[3] - box[1])) // 2 - box[1]
-        draw.text(
-            (x, y), line, font=font, fill=(255, 255, 255, 255),
-            stroke_width=3, stroke_fill=(0, 0, 0, 255),
+        rows = wrap(line)
+        line_height = int(size * 1.35)
+        image = Image.new(
+            "RGBA", (width, line_height * len(rows) + size // 2), (0, 0, 0, 0)
         )
+        draw = ImageDraw.Draw(image)
+        for row_index, row in enumerate(rows):
+            box = draw.textbbox((0, 0), row, font=font, stroke_width=3)
+            x = (width - (box[2] - box[0])) // 2 - box[0]
+            y = row_index * line_height + size // 4 - box[1]
+            draw.text(
+                (x, y), row, font=font, fill=(255, 255, 255, 255),
+                stroke_width=3, stroke_fill=(0, 0, 0, 255),
+            )
         png = sub_dir / f"cue{index:03d}.png"
         image.save(png)
         pngs.append(png)
