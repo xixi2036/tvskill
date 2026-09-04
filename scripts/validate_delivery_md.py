@@ -526,6 +526,7 @@ def check_posture_restated_per_shot(
     return warnings
 
 
+
 def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
     """交付校验必须有流程凭据：不跑状态机就直接跑本脚本，等于绕过整条流程锁。
 
