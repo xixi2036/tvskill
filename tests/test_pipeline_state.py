@@ -162,9 +162,10 @@ class PipelineStateTests(unittest.TestCase):
             "deliveryHash": MODULE.file_hash(self.delivery),
             "contractHash": MODULE.validation_contract_hash(),
         }
-        self.assertEqual(MODULE.invalidate_stale(state, "EP01", self.dir), [])
+        dropped, _ = MODULE.invalidate_stale(state, "EP01", self.dir)
+        self.assertEqual(dropped, [])
         self.delivery.write_text(ASSETS_FULL + "\n改了一个字\n", encoding="utf-8")
-        dropped = MODULE.invalidate_stale(state, "EP01", self.dir)
+        dropped, _ = MODULE.invalidate_stale(state, "EP01", self.dir)
         self.assertEqual(dropped, list(MODULE.CONTENT_SENSITIVE))
         # 交付 Markdown 是这些步骤的判据来源，改了就全部过期
         for step in ("entities", "assets", "segments", "coverage", "validate"):
@@ -180,7 +181,7 @@ class PipelineStateTests(unittest.TestCase):
             "deliveryHash": MODULE.file_hash(self.delivery),
             "contractHash": "stale-contract",
         }
-        dropped = MODULE.invalidate_stale(state, "EP01", self.dir)
+        dropped, _ = MODULE.invalidate_stale(state, "EP01", self.dir)
         self.assertEqual(dropped, list(MODULE.CONTRACT_SENSITIVE))
         for step in MODULE.CONTRACT_SENSITIVE:
             self.assertEqual(state["steps"][step], "pending")

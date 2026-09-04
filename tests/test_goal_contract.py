@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,6 +12,12 @@ SPEC = importlib.util.spec_from_file_location("goal_contract", MODULE_PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(MODULE)
+
+PIPELINE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "pipeline_state.py"
+PIPELINE_SPEC = importlib.util.spec_from_file_location("pipeline_state", PIPELINE_PATH)
+PIPELINE = importlib.util.module_from_spec(PIPELINE_SPEC)
+assert PIPELINE_SPEC.loader is not None
+PIPELINE_SPEC.loader.exec_module(PIPELINE)
 
 
 FILLED = """# 万妖图录传 目标契约
@@ -225,6 +233,125 @@ class TestDiff(unittest.TestCase):
     def test_no_change_yields_empty(self):
         old, _ = MODULE.parse(FILLED)
         self.assertEqual(MODULE.diff(old, dict(old)), [])
+
+
+class TestPipelineIntake(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.delivery_dir = self.root / "交付"
+        self.delivery_dir.mkdir()
+        (self.root / "目标契约.md").write_text(FILLED, encoding="utf-8")
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_intake_is_first_step(self):
+        self.assertEqual(PIPELINE.STEP_IDS[0], "intake")
+        script_units = next(s for s in PIPELINE.STEPS if s["id"] == "script_units")
+        self.assertEqual(script_units["requires"], ["intake"])
+
+    def test_goal_sensitive_excludes_intake(self):
+        self.assertNotIn("intake", PIPELINE.GOAL_SENSITIVE)
+        self.assertIn("segments", PIPELINE.GOAL_SENSITIVE)
+
+    def test_goal_contract_module_in_contract_hash(self):
+        before = PIPELINE.validation_contract_hash()
+        target = PIPELINE.SCRIPT_DIR / "goal_contract.py"
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b"\n# hash probe\n")
+            self.assertNotEqual(before, PIPELINE.validation_contract_hash())
+        finally:
+            target.write_bytes(original)
+
+    def test_finds_contract_by_walking_up(self):
+        found = PIPELINE.find_goal_contract(self.delivery_dir, None)
+        # .resolve() on both sides: macOS's TemporaryDirectory path lives under
+        # /var/..., a symlink to /private/var/...; find_goal_contract() resolves
+        # the directory internally, so comparing against the raw self.root would
+        # fail on macOS for reasons unrelated to the function's correctness.
+        self.assertEqual(found, (self.root / "目标契约.md").resolve())
+
+    def test_missing_contract_lists_searched_paths(self):
+        # 必须用**独立**的临时目录：self.root 下放着 目标契约.md，
+        # 从 self.root 的子目录向上找 3 层会命中它，用例就白跑了。
+        with tempfile.TemporaryDirectory() as other:
+            deep = Path(other) / "空" / "深"
+            deep.mkdir(parents=True)
+            ok, detail = PIPELINE.check_step(
+                "intake", "EP01", deep, None, None,
+                manual_confirmed=True, goal_path=None,
+            )
+        self.assertFalse(ok)
+        self.assertIn("搜索过", detail)
+
+    def test_intake_requires_manual_confirmed(self):
+        ok, detail = PIPELINE.check_step(
+            "intake", "EP01", self.delivery_dir, None, None,
+            manual_confirmed=False, goal_path=None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("--manual-confirmed", detail)
+
+    def test_intake_passes_with_confirmed_and_clean_contract(self):
+        ok, detail = PIPELINE.check_step(
+            "intake", "EP01", self.delivery_dir, None, None,
+            manual_confirmed=True, goal_path=None,
+        )
+        self.assertTrue(ok, detail)
+
+    def test_intake_rejects_pending_field(self):
+        (self.root / "目标契约.md").write_text(
+            FILLED.replace("- STYLE-ID：万妖图录传-写实国漫", "- STYLE-ID：待定"),
+            encoding="utf-8",
+        )
+        ok, detail = PIPELINE.check_step(
+            "intake", "EP01", self.delivery_dir, None, None,
+            manual_confirmed=True, goal_path=None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("STYLE-ID", detail)
+
+    def test_script_units_blocked_until_intake_done(self):
+        state = {"episode": "EP01", "steps": {}, "deliveryHash": "",
+                 "contractHash": "", "goalHash": "", "goal": {}}
+        self.assertEqual(
+            PIPELINE.blocking_prerequisites("script_units", state), ["intake"]
+        )
+        state["steps"]["intake"] = "done"
+        self.assertEqual(PIPELINE.blocking_prerequisites("script_units", state), [])
+
+    def test_goal_change_invalidates_downstream_and_reports_diff(self):
+        state = {
+            "episode": "EP01",
+            "steps": {"intake": "done", "script_units": "done", "segments": "done"},
+            "deliveryHash": "",
+            "contractHash": PIPELINE.validation_contract_hash(),
+            "goalHash": "stale-hash",
+            "goal": {"媒介": "3D CG"},
+        }
+        dropped, goal_diff = PIPELINE.invalidate_stale(
+            state, "EP01", self.delivery_dir, self.root / "目标契约.md",
+        )
+        self.assertIn("segments", dropped)
+        self.assertIn("script_units", dropped)
+        # intake 不能被自己作废——它是契约本身那一步。
+        self.assertEqual(state["steps"]["intake"], "done")
+        # 媒介 前后同值，不应出现在 diff 里；其余字段旧 goal 没有，出现属正常。
+        self.assertFalse(any(line.startswith("媒介：") for line in goal_diff))
+
+    def test_goal_diff_reports_changed_field(self):
+        state = {
+            "episode": "EP01",
+            "steps": {"intake": "done", "segments": "done"},
+            "deliveryHash": "",
+            "contractHash": PIPELINE.validation_contract_hash(),
+            "goalHash": "stale-hash",
+            "goal": dict(MODULE.parse(FILLED)[0], 媒介="真人实拍"),
+        }
+        _, goal_diff = PIPELINE.invalidate_stale(
+            state, "EP01", self.delivery_dir, self.root / "目标契约.md",
+        )
+        self.assertIn("媒介：真人实拍 → 3D CG", goal_diff)
 
 
 if __name__ == "__main__":
