@@ -91,6 +91,33 @@
 | 不要重复上一动作 | `已完成的拆信动作不重复，本镜从信纸展开状态开始。` |
 | 不要提前演后续剧情 | `本段止于抬眼，后续追赶暂不出现。` |
 
+## 四之二、禁止的滤镜化与特效化风格词
+
+上一节挡的是**缺陷词**（`不要模糊`、`no extra fingers`）。本节挡的是另一类：
+**看起来是正向风格词、实际会把画面推向滤镜感、赛博感、模板电影感的高风险词**。
+它们不触发第四节的判据，此前一直是漏网的。
+
+以下词**不得单独出现在发送给模型的提示词里**：
+
+| 高风险词 | 会跑偏成什么 | 替代写法 |
+|---|---|---|
+| `chromatic aberration`（裸用）、`RGB split`、`strong aberration` | 全图 RGB 错位、满画面彩边、蒸汽波感 | 必须带限定语，见 [成像基底与光学缺陷库](../libtv/optical-substrate-library.md) §3.1 |
+| `anamorphic flare` | 模板化蓝色横向光条 | 写具体光源与它在画面里的落点 |
+| `heavy film grain`、`film grain`（无基底裸用） | 均匀颗粒贴纸感 | 先选一个成像基底，再写「细小、不均匀」 |
+| `vintage filter`、`retro washed out` | 整体黄化、假复古 | 写「1970s/1990s 发行拷贝密度」这类可指认的成像特征 |
+| `cinematic color grading`、`moody film still`、`cinematic lighting` | 无来源的青橙、氛围形容词占位 | 写主光的物理来源、方向与冷暖 |
+| `dramatic neon`、`teal and orange` | 无来源双色光 | 色彩以色卡资产图与 inline HEX 为准 |
+| `epic`、`masterpiece`、`hyperreal`、`ultra detailed`、`razor sharp`、`volumetric` | 游戏概念图、宣传海报感 | 见 [风格母版](../libtv/visual-look-and-style-bible.md) §4.2 反游戏感词表 |
+
+判据与第四节一致：**能用正向状态锁说清的，不写风格标签**。
+风格标签只在起手帧的 STYLE LOCK 与连续组首镜的风格锁定行出现，不逐段复制。
+
+**与 NOT 链的关系**：[LibTV 完成提示词规范](../libtv/libtv-completed-prompt-format.md)
+允许第三段末尾写 `NOT xxx+NOT yyy` 收口本段最可能跑偏的**形态**。
+形态词（`NOT CGI render`、`NOT game cinematic`、`NOT concept art`）属于合法 NOT 链内容；
+缺陷词（模糊、多手指、变形）仍按第四节禁止。两者不得混写，且 NOT 链总长受
+第三节的约束预算约束，不因为加了形态词就挤掉画面基底。
+
 ## 五、删减优先级
 
 提示词过满时依次删除：

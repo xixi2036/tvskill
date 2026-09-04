@@ -132,16 +132,17 @@ python3 scripts/pipeline_state.py complete <集号> generate --manual-confirmed 
 2. 完整读取 v3 的 [输入归一化](references/v3/01-input-normalization.md)、[实体提取](references/v3/02-entity-extraction.md)、[时长与切分](references/v3/03-duration-and-storyboard-splitting.md)、[景别运镜](references/v3/04a-shot-scale-and-camera-library.md)、[调度构图光线](references/v3/04b-blocking-composition-lighting.md)、[约束编译](references/v3/04c-constraint-and-negative-prompt-compiler.md)、[镜头编写](references/v3/04-shot-writing-and-directing.md)、[台词与声音](references/v3/05-dialogue-and-audio.md)和[标签风格](references/v3/06-tags-and-style-control.md)。
 3. 完整读取 [制作就绪与返工合同](references/libtv/production-readiness-and-retake-contract.md)、[全剧提示词二审合同](references/libtv/series-continuity-audit-contract.md)、[LibTV 完成提示词规范](references/libtv/libtv-completed-prompt-format.md)、[Seedance 2.0 官方指南知识快照](references/libtv/seedance-2.0-official-guide-snapshot.md)、[Seedance 2.0 官方提示词优化适配](references/libtv/seedance-2.0-official-prompt-optimizer.md)、[真人表演、眼神与对白合同](references/libtv/performance-dialogue-contract.md)、[场景拓扑与功能朝向](references/libtv/scene-topology-and-functional-orientation.md)、[光影构图与画面风格母版](references/libtv/visual-look-and-style-bible.md)、[生成成片质量审计](references/libtv/generated-take-quality-audit.md)、[人工复制交付合同](references/libtv/manual-video-node-delivery.md)和 [Seedance 适配](references/libtv/seedance-2.0-adaptation.md)。
 4. 完整读取 [万物生实战 Craft 补充](references/libtv/wanwu-field-craft.md)：过冲量、反英雄景别与音画距离耦合三项官方规范未覆盖、但被真实上线成片反复验证的手法；与既有合同冲突时以既有合同为准。
-5. 项目没有现成素材、需要先造资产时，完整读取 [资产生产合同](references/libtv/asset-production-contract.md)。
-6. 只有用户要求实际操作 TVMao CLI 时，才读取 [TVMao 画布合同（兼容文件名）](references/libtv/libtv-canvas-contract.md)并核对本机版本与模型 schema。
-7. 只有用户明确要求某镜位试用 Seedance 2.5 时，才读取 [Seedance 2.5 适配（预研·未接入生产）](references/libtv/seedance-2.5-adaptation.md)；`validate_delivery_md.py` 当前只接受 2.0 VIP/Fast VIP 模型名，2.5 尚未进入生产白名单，其余节点继续按第 3 步的 Seedance 2.0 适配生产。
+5. 该 `LOOK-ID` 的保真取向确定走电影感一侧、且正在写起手帧或连续组首镜的风格锁定行时，才读取 [成像基底与光学缺陷库](references/libtv/optical-substrate-library.md)；它是 [起手帧合成合同](references/libtv/keyframe-composition-contract.md) STYLE LOCK 槽位的可选词库，**不是全局默认**——低保真取向（手机、监控、DV、伪纪录）与风格化 3D 不适用，其参数取自外部审美文档、未经 EP 回归验证，与既有合同冲突时以既有合同为准。
+6. 项目没有现成素材、需要先造资产时，完整读取 [资产生产合同](references/libtv/asset-production-contract.md)。
+7. 只有用户要求实际操作 TVMao CLI 时，才读取 [TVMao 画布合同（兼容文件名）](references/libtv/libtv-canvas-contract.md)并核对本机版本与模型 schema。
+8. 只有用户明确要求某镜位试用 Seedance 2.5 时，才读取 [Seedance 2.5 适配（预研·未接入生产）](references/libtv/seedance-2.5-adaptation.md)；`validate_delivery_md.py` 当前只接受 2.0 VIP/Fast VIP 模型名，2.5 尚未进入生产白名单，其余节点继续按第 3 步的 Seedance 2.0 适配生产。
 
 ## 核心知识库模块
 
 - 剧本与时长：内置 v3 归一化、原子事件和生成 Shot 预算；
 - 表演与声音：眼神、身体层级、对白、音色和声画同出；
 - 空间与连续性：场景母版、功能拓扑、家具/人体朝向、轴线和真实出点；
-- 摄影与质感：`STYLE-ID`、`LOOK-ID`、光线、构图、材质和运动节奏；
+- 摄影与质感：`STYLE-ID`、`LOOK-ID`、成像基底与光学缺陷、光线、构图、材质和运动节奏；
 - TVMao 执行：Mixed DSL 编译、稳定 modelId、有序入边、素材合规与运行前指纹凭证；
 - 生成后验收：全部版本回收、十轴审计、全剧装配和单变量返工。
 

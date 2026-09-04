@@ -228,6 +228,45 @@ def burn_with_overlay(args, merged: Path, srt_text: str, out: Path):
     return True
 
 
+
+def _maybe_upscale(args, out: Path) -> None:
+    """出片后升清。
+
+    万物生产线末端把 480p 生成稿统一升到 1080p 60fps（31 个 upscale 节点中 28 个如此），
+    **生成阶段用 480p 省算力，定稿才升清**。
+
+    但 tvmao CLI 只支持 image-input / audio-input / video-input /
+    image-generator / video-generator 五种节点类型，**没有 upscale**
+    （2026-09-04 实测 `--type upscale-video` 报 INVALID_NODE_TYPE）。
+    因此这里只能用 ffmpeg 的 lanczos 常规放大——它能补齐交付分辨率，
+    但**不是 AI 超分**，不会新增细节。真要 AI 超分需接外部工具或画布网页端。
+    """
+    if not args.upscale:
+        return
+    height = args.upscale
+    target = out.with_name(f"{out.stem}-{height}p{out.suffix}")
+    # 按**宽度**等比放大再居中裁高。按高度放大会在源画幅比 16:9 窄时
+    # 得到不足 16:9 的宽度，crop 直接失败（2026-09-04 实测 864x496 源）。
+    width = height * 16 // 9
+    result = subprocess.run(
+        [args.ffmpeg, "-v", "error", "-i", str(out),
+         "-vf",
+         f"scale={width}:-2:flags=lanczos,crop={width}:{height}:0:(ih-{height})/2",
+         "-c:v", "libx264", "-crf", "16", "-preset", "slow",
+         "-c:a", "copy", str(target), "-y"],
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        print(f"WARNING: 升清失败，保留原分辨率：{result.stderr.strip()[:200]}", file=sys.stderr)
+        return
+    print(
+        f"已升清：{target.name}（lanczos 常规放大到 {width}x{height}）\n"
+        f"  注意这不是 AI 超分，不会新增细节；画布 CLI 无 upscale 节点类型，"
+        f"AI 超分需外部工具或网页端",
+        file=sys.stderr,
+    )
+
+
 def probe_duration(ffprobe: str, path: Path) -> float:
     result = subprocess.run(
         [ffprobe, "-v", "error", "-show_entries", "format=duration",
@@ -247,6 +286,11 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--no-subtitles", action="store_true")
     parser.add_argument("--no-normalize", action="store_true", help="跳过逐段响度归一")
+    parser.add_argument(
+        "--upscale", metavar="HEIGHT", type=int,
+        help="出片后再升清到指定高度（如 1080）。用 lanczos 常规放大，"
+             "**不是 AI 超分**；画布 CLI 无 upscale 节点类型，AI 超分需外部工具",
+    )
     parser.add_argument("--font", default="PingFang SC")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--ffprobe", default="ffprobe")
@@ -361,6 +405,7 @@ def main() -> int:
         text=True, capture_output=True, check=False, cwd=str(out.parent),
     )
     if burned.returncode == 0:
+        _maybe_upscale(args, out)
         print(f"OK: {out}（{len(takes)} 段 / {total:.2f}s / 已烧字幕 {srt.name}）")
         return 0
 
@@ -368,6 +413,7 @@ def main() -> int:
     # 不能因为烧不上就退成软字幕——先用 Pillow 自渲字幕图 + overlay 硬烧。
     burned2 = burn_with_overlay(args, merged, srt_text, out)
     if burned2 is True:
+        _maybe_upscale(args, out)
         print(f"OK: {out}（{len(takes)} 段 / {total:.2f}s / 已烧硬字幕（Pillow+overlay））")
         return 0
     if isinstance(burned2, str):
@@ -388,6 +434,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    _maybe_upscale(args, out)
     print(
         f"OK: {out}（{len(takes)} 段 / {total:.2f}s / 已内嵌软字幕轨）\n"
         f"WARNING: 本机 ffmpeg 未编 libass，没有 subtitles 滤镜，无法烧录硬字幕。\n"
