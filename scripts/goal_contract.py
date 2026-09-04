@@ -177,3 +177,86 @@ def value_errors(goal: dict[str, str], linenos: dict[str, int]) -> list[str]:
             "光学缺陷库对低保真不适用"
         )
     return errors
+
+
+# 只对账有现成解析锚点的四项：媒介、模型展示名、画幅、分辨率（spec §10）。
+# BGM、音色采样预览例外、视频预算路线在交付 Markdown 中没有锚点，硬校验需
+# 新写三个解析器，按 YAGNI 不做；质量目标组是自然语言，无法等值比对（决策四）。
+# 「集数范围」仅记录，不参与校验。
+_DELIVERY_ANCHORS = {
+    "模型展示名": re.compile(r"^- 模型：(.+)$", re.M),
+    "画幅": re.compile(r"^- 画幅：(.+)$", re.M),
+    "分辨率": re.compile(r"^- 分辨率：(.+)$", re.M),
+}
+
+# 与 validate_delivery_md.py:215 的 MEDIUM_RE 保持同一套词。
+_MEDIUM_RE = re.compile(r"真人实拍|2D\s*动漫|二维动漫|3D\s*CG|三维动画|定格动画")
+_MEDIUM_CANONICAL = {
+    "二维动漫": "2D 动漫",
+    "三维动画": "3D CG",
+}
+
+
+def _canonical_medium(token: str) -> str:
+    token = re.sub(r"\s+", " ", token).strip()
+    return _MEDIUM_CANONICAL.get(token, token)
+
+
+def crosscheck(delivery_text: str, goal: dict[str, str]) -> list[str]:
+    """交付 Markdown 与母契约的正反向对账。
+
+    正向：契约每一项在交付中必须有落点，找不到即交付漏写。
+    反向：交付中出现的每一项声明必须能回溯到契约且值相等，
+          回溯不到或值不等即私自新增或漂移。
+
+    模式取自 references/v3/05-dialogue-and-audio.md 的语音对账。
+    只做正向会漏掉「交付里多出一个母契约没授权的声明」。
+    """
+    errors: list[str] = []
+
+    for name, pattern in _DELIVERY_ANCHORS.items():
+        expected = goal[name].strip()
+        found = [m.strip() for m in pattern.findall(delivery_text)]
+        if not found:
+            errors.append(
+                f"正向对账失败：母契约声明 {name}＝{expected}，"
+                f"但交付 Markdown 里找不到对应字段"
+            )
+            continue
+        wrong = sorted({value for value in found if value != expected})
+        if wrong:
+            errors.append(
+                f"反向对账失败：{name} 契约值＝{expected}，交付值＝{'／'.join(wrong)}；"
+                "全剧级声明不得在交付中被私自改写"
+            )
+
+    expected_medium = goal["媒介"].strip()
+    found_media = {_canonical_medium(m) for m in _MEDIUM_RE.findall(delivery_text)}
+    if expected_medium == "其它":
+        # 「其它」无法用 MEDIUM_RE 机器比对，其含义由 STYLE-ID 承载，跳过。
+        pass
+    elif not found_media:
+        errors.append(
+            f"正向对账失败：母契约声明媒介＝{expected_medium}，"
+            "但交付 Markdown 里没有任何媒介声明"
+        )
+    else:
+        wrong_media = sorted(found_media - {expected_medium})
+        if wrong_media:
+            errors.append(
+                f"反向对账失败：媒介契约值＝{expected_medium}，"
+                f"交付中还出现了未授权的媒介声明：{'／'.join(wrong_media)}；"
+                "媒介必须全剧统一，中途不得更换"
+            )
+    return errors
+
+
+def diff(old: dict[str, str], new: dict[str, str]) -> list[str]:
+    """字段级差异，供作废时告知用户「改了什么」。"""
+    changed: list[str] = []
+    for name in ALL_FIELDS:
+        before = old.get(name, "—")
+        after = new.get(name, "—")
+        if before != after:
+            changed.append(f"{name}：{before} → {after}")
+    return changed

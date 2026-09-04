@@ -45,6 +45,16 @@ FILLED = """# 万妖图录传 目标契约
 - 验收严格度：十轴审计全过
 """
 
+DELIVERY = """# EP01｜LibTV 完成提示词
+
+- 模型：Seedance 2.0 Fast VIP
+- 画幅：9:16
+- 分辨率：480p
+
+## 生成段 V01｜开场
+镜头1：中景。3D CG 写实国漫质感，画面中主角站在门口。
+"""
+
 
 class TestParse(unittest.TestCase):
     def test_parses_all_fields(self):
@@ -139,6 +149,68 @@ class TestValueErrors(unittest.TestCase):
         goal, linenos = self._goal(**{"保真取向": "低保真"})
         errors = MODULE.value_errors(goal, linenos)
         self.assertTrue(any("成像基底" in e and "不适用" in e for e in errors))
+
+
+class TestCrosscheck(unittest.TestCase):
+    def test_consistent_delivery_passes(self):
+        goal, _ = MODULE.parse(FILLED)
+        self.assertEqual(MODULE.crosscheck(DELIVERY, goal), [])
+
+    def test_forward_missing_anchor_reports(self):
+        text = DELIVERY.replace("- 分辨率：480p\n", "")
+        goal, _ = MODULE.parse(FILLED)
+        errors = MODULE.crosscheck(text, goal)
+        self.assertTrue(any("分辨率" in e for e in errors))
+
+    def test_model_mismatch_shows_both_values(self):
+        text = DELIVERY.replace("Seedance 2.0 Fast VIP", "Seedance 2.0 VIP")
+        goal, _ = MODULE.parse(FILLED)
+        errors = MODULE.crosscheck(text, goal)
+        self.assertTrue(any("Seedance 2.0 Fast VIP" in e and "Seedance 2.0 VIP" in e
+                            for e in errors))
+
+    def test_ratio_mismatch_reports(self):
+        text = DELIVERY.replace("- 画幅：9:16", "- 画幅：16:9")
+        goal, _ = MODULE.parse(FILLED)
+        self.assertTrue(any("画幅" in e for e in MODULE.crosscheck(text, goal)))
+
+    def test_resolution_mismatch_reports(self):
+        text = DELIVERY.replace("- 分辨率：480p", "- 分辨率：720p")
+        goal, _ = MODULE.parse(FILLED)
+        errors = MODULE.crosscheck(text, goal)
+        self.assertTrue(any("分辨率" in e and "480p" in e and "720p" in e
+                            for e in errors))
+
+    def test_reverse_unauthorized_medium_reports(self):
+        # 契约声明 3D CG，交付里某一段冒出「真人实拍」——反向对账必须抓到。
+        text = DELIVERY + "\n镜头2：近景。真人实拍，自然光。\n"
+        goal, _ = MODULE.parse(FILLED)
+        errors = MODULE.crosscheck(text, goal)
+        self.assertTrue(any("真人实拍" in e for e in errors))
+
+    def test_medium_synonym_accepted(self):
+        text = DELIVERY.replace("3D CG 写实国漫质感", "三维动画 写实国漫质感")
+        goal, _ = MODULE.parse(FILLED)
+        self.assertEqual(MODULE.crosscheck(text, goal), [])
+
+    def test_record_only_and_quality_fields_not_crosschecked(self):
+        goal, _ = MODULE.parse(FILLED)
+        goal["集数范围"] = "EP01-EP99"
+        goal["对标成片"] = "完全不同的片子"
+        goal["BGM"] = "有"
+        self.assertEqual(MODULE.crosscheck(DELIVERY, goal), [])
+
+
+class TestDiff(unittest.TestCase):
+    def test_reports_changed_fields_only(self):
+        old, _ = MODULE.parse(FILLED)
+        new = dict(old)
+        new["媒介"] = "真人实拍"
+        self.assertEqual(MODULE.diff(old, new), ["媒介：3D CG → 真人实拍"])
+
+    def test_no_change_yields_empty(self):
+        old, _ = MODULE.parse(FILLED)
+        self.assertEqual(MODULE.diff(old, dict(old)), [])
 
 
 if __name__ == "__main__":
