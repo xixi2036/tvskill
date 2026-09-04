@@ -234,9 +234,10 @@ def main() -> int:
         return 0
 
     print("── 门禁通过，开始生成 ──", file=sys.stderr)
+    # 不传 --wait：它会无限阻塞，把超时控制权交给 CLI。2026-09-04 实测一个节点
+    # 在 --wait 里挂了 45 分钟，本脚本的 900s 轮询超时因此从未开始计时，整条
+    # 顺序队列被这一个节点堵死。提交后由本脚本自己轮询，超时才真正可控。
     command = [tvmao, "node", "run", args.node, "--project", args.project]
-    if args.wait:
-        command.append("--wait")
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     sys.stdout.write(result.stdout)
     if result.returncode != 0:
