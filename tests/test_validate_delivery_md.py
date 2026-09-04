@@ -820,3 +820,101 @@ def test_same_line_must_not_repeat_in_one_shot():
     # {{Mixed N}} 不是台词，不该被算进来
     mixed = "Shot 1: @[角色] {{Mixed 1}} 与 @[色卡] {{Mixed 1}} 并列。\n"
     assert module.check_no_duplicate_lines(mixed) == []
+
+
+def test_storyboard_grammar_gates():
+    """分镜语法闸：四要素头、受控词表、POV 规则、转场、写作纪律。
+
+    对标 doubao-creative-drama 的 storyboard.md。tvskill 此前的镜头是散文式的，
+    最严重的是**完全没有「视角类型」这个维度**——从没区分过镜头是
+    「从外面看」（第三人称客观）还是「从角色眼睛里看」（POV 第一人称）。
+
+    只对时间戳新形态强制；旧的 Shot N 形态是既有产线在用的交付形式，不受约束。
+    """
+    module = MODULE
+
+    def seg(body: str) -> str:
+        return "## 生成段 V01｜测试\n\n```text\n" + body + "\n```\n"
+
+    ok = seg(
+        "0-3 秒：[中景｜第三人称客观视角｜固定｜半侧面] 姜月初走进屋内，"
+        "右手推门后停住。 [硬切]"
+    )
+    errors, _w = module.check_storyboard_grammar(ok)
+    assert errors == [], errors
+
+    # 缺四要素头
+    e, _ = module.check_storyboard_grammar(seg("0-3 秒：姜月初走进屋内。 [硬切]"))
+    assert any("缺少四要素头" in x for x in e)
+
+    # 景别不在词表
+    e, _ = module.check_storyboard_grammar(
+        seg("0-3 秒：[超级近｜第三人称客观视角｜固定｜正面] 她站住。 [硬切]")
+    )
+    assert any("景别" in x and "受控词表" in x for x in e)
+
+    # 视角类型缺失是本次补的核心维度
+    e, _ = module.check_storyboard_grammar(
+        seg("0-3 秒：[中景｜客观镜头｜固定｜正面] 她站住。 [硬切]")
+    )
+    assert any("视角类型" in x for x in e)
+
+    # POV 必须写明角色 + 眼睛高度，且不得出现该角色完整正脸
+    e, _ = module.check_storyboard_grammar(
+        seg("0-3 秒：[特写｜POV 第一人称视角｜手持感运镜｜俯拍] 看向桌面。 [硬切]")
+    )
+    assert any("没写明所属角色" in x for x in e)
+    assert any("眼睛高度" in x for x in e)
+
+    e, _ = module.check_storyboard_grammar(
+        seg(
+            "0-3 秒：[特写｜林远 POV 第一人称视角｜手持感运镜｜俯拍] "
+            "从林远眼睛高度俯看桌面，画面里出现林远的完整正脸。 [硬切]"
+        )
+    )
+    assert any("完整正脸" in x for x in e)
+
+    # 转场必须标注
+    e, _ = module.check_storyboard_grammar(
+        seg("0-3 秒：[中景｜第三人称客观视角｜固定｜正面] 她站住。")
+    )
+    assert any("转场" in x for x in e)
+
+    # 写作纪律
+    base = "0-3 秒：[中景｜第三人称客观视角｜固定｜正面] {}。 [硬切]"
+    e, _ = module.check_storyboard_grammar(seg(base.format("她非常愤怒地站着")))
+    assert any("抽象情绪词" in x for x in e)
+    e, _ = module.check_storyboard_grammar(seg(base.format("三个人面面相觑")))
+    assert any("群体量词" in x for x in e)
+    e, _ = module.check_storyboard_grammar(seg(base.format("那个男人走过来")))
+    assert any("指代已命名角色" in x for x in e)
+
+    # 旧 Shot N 形态不受本闸约束
+    legacy = seg("Shot 1: 稳定中景，姜月初走进屋内。")
+    assert module.check_storyboard_grammar(legacy) == ([], [])
+
+
+def test_vague_quality_words_are_rejected():
+    """模糊质量词不能单独作约束。
+
+    对标 doubao-creative-drama assets.md：「禁止使用模糊质量词单独作为约束，
+    例如"高级、漂亮、震撼、氛围感强"，必须替换为具体的构图、光影、色彩、
+    材质和空间描述。」与 zy-cinematic-realism 的 Restraint Test 同向——
+    风格词不能冒充实质。
+    """
+    module = MODULE
+
+    def seg(body: str) -> str:
+        return (
+            "## 生成段 V01｜测试\n\n```text\n"
+            "0-3 秒：[中景｜第三人称客观视角｜固定｜正面] " + body + " [硬切]\n```\n"
+        )
+
+    e, _ = module.check_storyboard_grammar(seg("画面氛围感强，非常高级。"))
+    assert any("模糊质量词" in x for x in e)
+
+    ok = seg(
+        "#3F4A57 铅灰云层占画面上三成，云隙天光自左上斜射落在中景草地形成唯一高亮区；"
+        "青灰草地高粗糙度微反射，湿泥呈窄反射带。"
+    )
+    assert not [x for x in module.check_storyboard_grammar(ok)[0] if "模糊质量词" in x]

@@ -31,6 +31,7 @@ from _shared_patterns import (
     SUPPORTED_MODELS,
 )
 from _shot_budget import shot_budget_messages  # noqa: E402
+import _storyboard_grammar as SG  # noqa: E402
 from _fast_drama_contract import prompt_quality_messages  # noqa: E402
 
 
@@ -144,7 +145,15 @@ BANNED_PROMPT_PATTERNS = (
 BRACKET_RE = re.compile(r"【[^】]*】")
 ALLOWED_BRACKETS_RE = re.compile(r"^【(?:阶段\d+[^】]*|声音设计|关键约束)】$")
 SOUND_DESIGN_BLOCK_RE = re.compile(r"【声音设计】.*?(?=\n\s*\n|\n\s*【|\Z)", re.S)
-STYLE_LOCK_RE = re.compile(r"^[^\n]*(?:美学|质感|色调|film|grain|aesthetics)[^\n]*$", re.I)
+# 风格锁定行：除既有的美学/质感/色调类描述外，也接受**可指认的对标**——
+# 导演／摄影师／影片名或标准类型词。对标 doubao-creative-drama：
+# 风格字段应写「某某风格的电影」或「3D 玄幻风格」这类模型见过的锚点，
+# 自造描述词（如「高端东方玄幻 3D 低饱和废土战场美学」）模型无从对齐。
+STYLE_LOCK_RE = re.compile(
+    r"^[^\n]*(?:美学|质感|色调|film|grain|aesthetics|"
+    r"风格的电影|风格化|对标|掌镜|执导|赛璐璐|水墨|皮克斯)[^\n]*$",
+    re.I,
+)
 ASSET_ANCHOR_RE = re.compile(r"严格按此图渲染|视觉锚定.{0,24}不可改造")
 # 同样不能用 \b：#7A4FBD暗紫 这种紧贴中文的写法才是真实语料里的常态。
 INLINE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}(?![0-9A-Fa-f])")
@@ -573,6 +582,162 @@ def check_no_duplicate_lines(text: str) -> list[str]:
                 "同镜重复会让模型把一句说成两遍"
             )
     return errors
+
+
+
+def check_storyboard_grammar(text: str) -> tuple[list[str], list[str]]:
+    """分镜语法闸：四要素头、转场、受控词表、POV 规则、写作纪律。
+
+    对标 doubao-creative-drama 的 storyboard.md（用户 2026-09-04 指定为主要基准）。
+    tvskill 此前的镜头是散文式的，最严重的是**完全没有「视角类型」这个维度**——
+    整条产线从没区分过镜头是「从外面看」还是「从角色眼睛里看」。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    heads = list(SEGMENT_HEADING_RE.finditer(text))
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+        section_text = text[head.start():end]
+        block = re.search(r"```text\n(.*?)```", section_text, re.S)
+        if not block:
+            continue
+        label = f"V{head.group(1)}"
+        prompt = block.group(1)
+        # 分镜语法只对**时间戳新形态**强制。旧的 Shot N 形态是既有产线在用的
+        # 交付形式，一刀切会打断在途项目；它保留原有规则，不受本闸约束。
+        blocks = TIMESTAMP_BLOCK_SPLIT_RE.findall(prompt)
+        if not blocks:
+            continue
+        for order, shot in enumerate(blocks, 1):
+            first = shot.split("\n", 1)[0]
+            parts = SG.parse_shot_head(first)
+            if parts is None:
+                errors.append(
+                    f"{label} 第 {order} 个时间段缺少四要素头："
+                    "应写 `[景别｜视角类型｜机位状态｜角度与朝向]`，四项齐全"
+                )
+                continue
+            size, viewpoint, move, angle = parts
+            if not SG.in_vocabulary(size, SG.SHOT_SIZES):
+                errors.append(f"{label} 第 {order} 段景别「{size}」不在受控词表内")
+            if not (
+                SG.VIEWPOINT_OBJECTIVE in viewpoint
+                or SG.is_pov(viewpoint)
+                or SG.VIEWPOINT_SWITCH in viewpoint
+            ):
+                errors.append(
+                    f"{label} 第 {order} 段视角类型「{viewpoint}」不合规："
+                    "必须是第三人称客观视角／某角色 POV 第一人称视角／POV 与第三视角切换"
+                )
+            if not SG.in_vocabulary(move, SG.CAMERA_MOVES):
+                errors.append(f"{label} 第 {order} 段机位状态「{move}」不在受控词表内")
+            if not SG.in_vocabulary(angle, SG.CAMERA_ANGLES):
+                errors.append(f"{label} 第 {order} 段角度与朝向「{angle}」不在受控词表内")
+
+            if SG.is_pov(viewpoint):
+                who = SG.VIEWPOINT_POV_RE.sub("", viewpoint).strip()
+                if not who:
+                    errors.append(
+                        f"{label} 第 {order} 段 POV 没写明所属角色；"
+                        "只写「第一人称」不算，必须写成「某某 POV 第一人称视角」"
+                    )
+                if not SG.POV_EYE_LEVEL_RE.search(shot):
+                    errors.append(
+                        f"{label} 第 {order} 段是 POV，正文必须写明从该角色眼睛高度出发"
+                    )
+                if SG.POV_FACE_BAN_RE.search(shot):
+                    errors.append(
+                        f"{label} 第 {order} 段是 POV，画面里不能出现该角色的完整正脸"
+                    )
+                if SG.POV_SELFIE_BAN_RE.search(shot):
+                    errors.append(
+                        f"{label} 第 {order} 段把 POV 写成了自拍／监控／无人机视角；"
+                        "需要过肩效果请直接写「过肩镜头」"
+                    )
+
+            if not SG.TRANSITION_RE.search(shot):
+                errors.append(
+                    f"{label} 第 {order} 段末尾缺少转场标注："
+                    "须写 [硬切]／[叠化]／[视线跟随切] 之一"
+                )
+
+        if SG.VAGUE_QUALITY_RE.search(prompt):
+            hit = SG.VAGUE_QUALITY_RE.search(prompt).group(0)
+            errors.append(
+                f"{label} 使用了模糊质量词「{hit}」；必须替换为具体的构图、光影、"
+                "色彩、材质或空间描述——风格词不能冒充实质"
+            )
+        if SG.ABSTRACT_EMOTION_RE.search(prompt):
+            hit = SG.ABSTRACT_EMOTION_RE.search(prompt).group(0)
+            errors.append(
+                f"{label} 使用了抽象情绪词「{hit}」；情绪必须外化为具体身体细节"
+                "（低头／肩膀颤抖／指节攥紧衣角／下颌线绷紧）"
+            )
+        if SG.CROWD_QUANTIFIER_RE.search(prompt):
+            hit = SG.CROWD_QUANTIFIER_RE.search(prompt).group(0)
+            errors.append(
+                f"{label} 使用了群体量词「{hit}」；必须写全当前镜头内每个角色的名字"
+            )
+        if SG.PRONOUN_REF_RE.search(prompt):
+            hit = SG.PRONOUN_REF_RE.search(prompt).group(0)
+            errors.append(
+                f"{label} 用「{hit}」指代已命名角色；同一角色全程必须同名"
+            )
+    return errors, warnings
+
+
+
+# 留白式风格写法：模型无从对齐，必须换成可指认的锚点。
+VAGUE_STYLE_RE = re.compile(
+    r"^(?:电影风格|影视级布光|高级感|大片感|电影感|质感风格)$"
+)
+# 可指认的风格锚点：真人路径写「某某风格的电影」，非真人路径写类型词。
+NAMED_STYLE_RE = re.compile(r"风格的电影|3D\s*\S+风格|2D\s*\S+风格|赛璐璐|水墨|皮克斯")
+STYLE_FIELD_RE = re.compile(r"^- 风格：(.+)$", re.M)
+
+
+def check_style_anchor(text: str) -> tuple[list[str], list[str]]:
+    """全剧风格锚点：一个来源、一字不差、可指认。
+
+    对标 doubao-creative-drama：剧本头 `风格` 字段是全链路唯一锚点，
+    下游所有资产、关键帧、视频提示词的首句风格限定词必须**一字不差**沿用；
+    读到「电影风格」「影视级布光」这类留白写法应停下回填，不得继续生成。
+
+    tvskill 此前各段自己写风格行、无统一来源，本集用的是自造描述词
+    「高端东方玄幻 3D 低饱和废土战场美学」——模型没见过这种词，无从对齐。
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    field = STYLE_FIELD_RE.search(text)
+    if not field:
+        # 向后兼容：没声明 `风格` 字段的旧交付不触发本闸，不打断在途项目。
+        # 声明了才走全套检查——这是新标准的自愿加入方式。
+        return errors, warnings
+    style = field.group(1).strip()
+    if VAGUE_STYLE_RE.match(style):
+        errors.append(
+            f"风格字段「{style}」是留白写法，模型无从对齐；"
+            "真人路径写「某某风格的电影」（可带代表作），非真人路径写「3D 玄幻风格」等类型词"
+        )
+    elif not NAMED_STYLE_RE.search(style):
+        warnings.append(
+            f"风格字段「{style}」不是可指认的锚点；"
+            "建议改为导演／影片对标（「王家卫《花样年华》风格的电影」）或标准类型词"
+        )
+    # 各段提示词首句必须含该锚点
+    heads = list(SEGMENT_HEADING_RE.finditer(text))
+    missing = []
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+        block = re.search(r"```text\n(.*?)```", text[head.start():end], re.S)
+        if block and style not in block.group(1):
+            missing.append(f"V{head.group(1)}")
+    if missing:
+        errors.append(
+            f"这些段的提示词没有一字不差沿用风格锚点「{style}」：{missing}；"
+            "全项目风格限定词必须同源同字，不得各段自写"
+        )
+    return errors, warnings
 
 
 def check_pipeline_state(path: Path) -> tuple[list[str], list[str]]:
@@ -1262,6 +1427,12 @@ def validate(
             errors.extend(check_voice_against_script(voice_rows, script, episode))
         errors.extend(check_voice_lines_reach_prompt(voice_rows, text))
         errors.extend(check_no_duplicate_lines(text))
+        style_errors, style_warnings = check_style_anchor(text)
+        errors.extend(style_errors)
+        warnings.extend(style_warnings)
+        grammar_errors, grammar_warnings = check_storyboard_grammar(text)
+        errors.extend(grammar_errors)
+        warnings.extend(grammar_warnings)
 
     count_match = SEGMENT_COUNT_RE.search(text)
     if not count_match:
