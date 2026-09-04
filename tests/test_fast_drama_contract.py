@@ -172,3 +172,46 @@ def test_shot_budget_is_dialogue_aware():
     # 同样镜数在无台词段不告警
     _errors, warns_none = module.shot_budget_messages(12, 5, spoken_chars=0)
     assert not any("长对话段" in w for w in warns_none)
+
+
+def test_timestamp_plan_replaces_shot_labels():
+    """时间戳动作规划：万物生语料与豆包官方 skill 的一致写法。
+
+    万物生 299 条视频提示词里 `Shot N:` 出现率 **0%**；豆包官方 `prompt.md`
+    通篇用 `0-3 秒 / 3-6 秒`。时间段是「这段时间画面在干什么」，不是子镜头，
+    因此不套 2.1 秒刀长基线，也不套 1–4 秒单镜上限——豆包官方示例自己就有
+    3 秒一段与更长的合并段。
+
+    时间戳形态只校验三件事：从 0 起、段间连续、末段止于段时长。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "_fast_drama_contract.py"
+    spec = importlib.util.spec_from_file_location("_fdc", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    good = (
+        "0-3 秒：远景推门，镜头 0.6m/s 匀速右移。\n\n"
+        "3-9 秒：中景走进客厅，步频每秒 1 步。\n\n"
+        "9-15 秒：近景抚摸相框，指尖停留约 1 秒。\n"
+    )
+    errors, _w = module.prompt_quality_messages(
+        good, 15, has_character_references=False
+    )
+    assert not [e for e in errors if "时间戳" in e]
+    # 6 秒一段也不该被 1–4 秒上限拦下
+    assert not [e for e in errors if "单镜只允许" in e]
+
+    gap = "0-3 秒：A。\n\n6-15 秒：B。\n"
+    errors, _w = module.prompt_quality_messages(gap, 15, has_character_references=False)
+    assert any("不连续" in e for e in errors)
+
+    short = "0-3 秒：A。\n\n3-9 秒：B。\n"
+    errors, _w = module.prompt_quality_messages(short, 15, has_character_references=False)
+    assert any("与段时长" in e for e in errors)
+
+    mixed = "0-3 秒：A。\n\n3-15 秒：B。\n\nShot 1: C。\n"
+    errors, _w = module.prompt_quality_messages(mixed, 15, has_character_references=False)
+    assert any("二选一" in e for e in errors)

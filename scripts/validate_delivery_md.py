@@ -13,7 +13,9 @@ from pathlib import Path as _Path
 
 _sys.path.insert(0, str(_Path(__file__).resolve().parent))
 from _shared_patterns import (
-    NARRATION_RE,  # noqa: E402
+    NARRATION_RE,
+    TIMESTAMP_BLOCK_RE,
+    TIMESTAMP_BLOCK_SPLIT_RE,  # noqa: E402
     OS_VO_RE,
     DIALOGUE_RE,
     EXACT_SHOT_RE,
@@ -288,7 +290,10 @@ def has_synchronous_dialogue(prompt: str) -> bool:
 
 
 def synchronous_dialogue_blocks(prompt: str) -> list[str]:
-    blocks = EXACT_SHOT_BLOCK_RE.findall(prompt)
+    # 时间戳动作规划优先：万物生语料与豆包官方 skill 都用它替代镜头标签。
+    blocks = TIMESTAMP_BLOCK_SPLIT_RE.findall(prompt)
+    if not blocks:
+        blocks = EXACT_SHOT_BLOCK_RE.findall(prompt)
     if not blocks:
         blocks = LEGACY_SHOT_BLOCK_RE.findall(prompt)
     if not blocks:
@@ -849,8 +854,16 @@ def validate(
                 errors.append(f"{label} Shot N 编号必须从 1 连续递增")
             if continuous_take:
                 errors.append(f"{label} 不能同时声明连续镜头和 Shot N 剪切")
+        elif TIMESTAMP_BLOCK_RE.search(prompt):
+            # 时间戳动作规划：万物生语料与豆包官方 skill 的一致写法，
+            # 段内不用镜头标签，改为把段时长切成连续时间段。
+            # 连续性与总时长由 _fast_drama_contract 校验。
+            pass
         elif not continuous_take:
-            errors.append(f"{label} 必须声明“单一连续镜头，无剪切”或使用精确 Shot N:")
+            errors.append(
+                f"{label} 必须使用时间戳动作规划（`0-3 秒：`）、"
+                "精确 Shot N: 或声明“单一连续镜头，无剪切”"
+            )
         else:
             budget_errors, budget_warnings = shot_budget_messages(
                 duration,

@@ -22,7 +22,12 @@ import re
 # 前向若排除大写字母，角色名带拉丁后缀时会整片漏判。
 # 不加 re.I：re.IGNORECASE 会让 (?<![a-z]) 连大写字母一并排除，
 # 反而把「角色AVO」挡在外面。故显式列大小写。
-OS_VO_RE = re.compile(r"(?<![a-z])(?:OS|VO|os|vo)(?![A-Za-z])|内心|画外音|旁白")
+# 2026-09-04 补：系统音／画外音同属「声源不在画面内、无可见口型」这一类，
+# 判据语义本就是「非同步人声」，系统流短剧里的系统音必须归此列，
+# 否则会被当成同步对白要求口型与 {} 符号。
+OS_VO_RE = re.compile(
+    r"(?<![a-z])(?:OS|VO|os|vo)(?![A-Za-z])|内心|画外音|画外|旁白|系统音"
+)
 
 # 精确台词真值锁：{} 内是逐字台词，{{Mixed N}} 不算。
 DIALOGUE_RE = re.compile(r"(?<!\{)\{([^{}\n]+)\}(?!\})")
@@ -35,6 +40,26 @@ NARRATION_RE = re.compile(r"『([^』\n]+)』")
 
 # 模型多镜标签。
 EXACT_SHOT_RE = re.compile(r"^Shot\s+(\d+):", re.M)
+
+# 时间戳动作规划块：`0-3 秒：` / `3-6秒:`。
+# 这是万物生真实语料与豆包官方 skill 一致的写法——段内不用镜头标签，
+# 而是把段时长切成连续时间段，每段写运镜、动作、剧情、声音。
+# 299 条万物生视频提示词里 `Shot N:` 出现率 0%；豆包官方示例通篇 `0-3 秒`。
+TIMESTAMP_BLOCK_RE = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*[-–~]\s*(\d+(?:\.\d+)?)\s*秒\s*[：:]", re.M
+)
+TIMESTAMP_BLOCK_SPLIT_RE = re.compile(
+    r"^\d+(?:\.\d+)?\s*[-–~]\s*\d+(?:\.\d+)?\s*秒\s*[：:].*?"
+    r"(?=^\d+(?:\.\d+)?\s*[-–~]|^【|\Z)",
+    re.M | re.S,
+)
+
+
+def timestamp_spans(prompt: str) -> list[tuple[float, float]]:
+    """取出时间戳动作规划的各时间段。"""
+    return [
+        (float(a), float(b)) for a, b in TIMESTAMP_BLOCK_RE.findall(prompt)
+    ]
 # 末镜必须止于第一个【…】小节，否则它会吞掉【声音设计】【关键约束】和收尾行。
 # 2026-09-04 实证：V06 末镜自身干净，却因【声音设计】里的「内心独白」被判
 # 「同一 Shot 内混合口型对白与 OS/VO」——误报。反向更危险：末镜缺「固定机位」时，

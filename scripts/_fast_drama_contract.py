@@ -5,7 +5,14 @@ from __future__ import annotations
 import collections
 import re
 
-from _shared_patterns import DIALOGUE_RE, EXACT_SHOT_BLOCK_RE, EXACT_SHOT_RE, OS_VO_RE
+from _shared_patterns import (
+    DIALOGUE_RE,
+    EXACT_SHOT_BLOCK_RE,
+    EXACT_SHOT_RE,
+    OS_VO_RE,
+    TIMESTAMP_BLOCK_SPLIT_RE,
+    timestamp_spans,
+)
 from _shot_budget import shot_budget_messages
 
 
@@ -60,15 +67,40 @@ def prompt_quality_messages(
     errors: list[str] = []
     warnings: list[str] = []
     shots = [int(number) for number in EXACT_SHOT_RE.findall(prompt)]
+    spans = timestamp_spans(prompt)
 
-    if shots:
+    if spans:
+        # 时间戳动作规划：万物生语料与豆包官方 skill 的一致写法。
+        # 时间段是「这段时间画面在干什么」，不是子镜头，因此
+        # 不套 2.1 秒刀长基线，也不套 1–4 秒单镜上限——豆包官方示例
+        # 本身就有 0-3/3-6/6-9/9-12/12-15 这样 3 秒一段、以及更长的合并段。
+        if spans[0][0] != 0:
+            errors.append(f"时间戳动作规划必须从 0 秒起，当前首段起点为 {spans[0][0]:g} 秒")
+        for index in range(len(spans) - 1):
+            if abs(spans[index][1] - spans[index + 1][0]) > 0.01:
+                errors.append(
+                    f"时间戳动作规划不连续：{spans[index][1]:g} 秒之后跳到 "
+                    f"{spans[index + 1][0]:g} 秒，中间有空档"
+                )
+        if abs(spans[-1][1] - duration) > 0.5:
+            errors.append(
+                f"时间戳动作规划止于 {spans[-1][1]:g} 秒，与段时长 {duration} 秒不符"
+            )
+        if shots:
+            errors.append("不能同时使用时间戳动作规划与 Shot N: 多镜标签，二选一")
+
+    if shots and not spans:
         # 只有**同步对白**才约束刀长：口型要对上，就必须停在说话人脸上。
         # 内心独白与画外音不需要口型，压在快切蒙太奇上完全成立——参考成片的
         # 回忆段正是「快切画面 + 连续独白」。把独白也算进念白时长会误判，
         # 2026-09-04 首版就把三个纯独白段（V05/V08/V10）错报成长对话段。
         spoken_chars = sum(
             len(re.findall(r"[\u4e00-\u9fff]", line))
-            for block in EXACT_SHOT_BLOCK_RE.findall(prompt) or [prompt]
+            for block in (
+                TIMESTAMP_BLOCK_SPLIT_RE.findall(prompt)
+                or EXACT_SHOT_BLOCK_RE.findall(prompt)
+                or [prompt]
+            )
             if not OS_VO_RE.search(block)
             for line in DIALOGUE_RE.findall(block)
         )
