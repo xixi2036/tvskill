@@ -233,8 +233,15 @@ def crosscheck(delivery_text: str, goal: dict[str, str]) -> list[str]:
     expected_medium = goal["媒介"].strip()
     found_media = {_canonical_medium(m) for m in _MEDIUM_RE.findall(delivery_text)}
     if expected_medium == "其它":
-        # 「其它」无法用 MEDIUM_RE 机器比对，其含义由 STYLE-ID 承载，跳过。
-        pass
+        # 「其它」不在 MEDIUM_RE 的词表内，无法与交付中的媒介词等值比对，
+        # 故跳过**正向**落点检查。但反向不能一起放行——那会让契约声明「其它」时，
+        # 交付里混入任何未授权媒介都检测不到，等于整条媒介对账失效。
+        # 退化为自洽检查：交付中的媒介声明必须彼此一致，不得在两个标准媒介间摇摆。
+        if len(found_media) > 1:
+            errors.append(
+                "反向对账失败：媒介契约值＝其它，交付中出现了多个互不相同的媒介声明："
+                f"{'／'.join(sorted(found_media))}；媒介必须全剧统一，中途不得更换"
+            )
     elif not found_media:
         errors.append(
             f"正向对账失败：母契约声明媒介＝{expected_medium}，"

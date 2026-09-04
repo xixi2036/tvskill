@@ -188,6 +188,20 @@ class TestCrosscheck(unittest.TestCase):
         errors = MODULE.crosscheck(text, goal)
         self.assertTrue(any("真人实拍" in e for e in errors))
 
+    def test_other_medium_still_catches_internal_drift(self):
+        # 契约写「其它」时跳过正向落点检查，但反向不能一起放行：
+        # 交付里同时出现两个不同的标准媒介词，仍必须报错。
+        goal, _ = MODULE.parse(FILLED)
+        goal["媒介"] = "其它"
+        text = DELIVERY + "\n镜头2：近景。真人实拍，自然光。\n"
+        errors = MODULE.crosscheck(text, goal)
+        self.assertTrue(any("其它" in e and "真人实拍" in e for e in errors))
+
+    def test_other_medium_consistent_delivery_passes(self):
+        goal, _ = MODULE.parse(FILLED)
+        goal["媒介"] = "其它"
+        self.assertEqual(MODULE.crosscheck(DELIVERY, goal), [])
+
     def test_medium_synonym_accepted(self):
         text = DELIVERY.replace("3D CG 写实国漫质感", "三维动画 写实国漫质感")
         goal, _ = MODULE.parse(FILLED)
