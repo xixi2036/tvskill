@@ -252,14 +252,17 @@ def check_step(
         # （定场主体偏小偏远）。万物生的做法是先用图像模型把这一镜的构图、角色站位、
         # 光影色调钉成一张图，再让视频模型只负责让它动。
         # 详见 references/libtv/keyframe-composition-contract.md
-        heads = re.findall(r"^## 生成段 (V\d{2})｜", text, re.M)
+        # 不能用 section()：它在下一个 ### 处截断，只会拿到段的元信息块，
+        # 而起手帧绑定写在更后面的提示词代码块里。必须切到下一个「## 生成段」。
+        heads = list(re.finditer(r"^## 生成段 (V\d{2})｜", text, re.M))
         if not heads:
             return False, "交付 Markdown 里没有生成段，无法核对起手帧"
         missing = []
-        for seg in heads:
-            block = section(text, f"## 生成段 {seg}｜")
-            if not re.search(r"起手帧[-－]?" + seg + r"|起手帧", block):
-                missing.append(seg)
+        for index, head in enumerate(heads):
+            end = heads[index + 1].start() if index + 1 < len(heads) else len(text)
+            block = text[head.start():end]
+            if "起手帧" not in block:
+                missing.append(head.group(1))
         if missing:
             return False, (
                 f"这些段没有声明起手帧：{missing}；"
